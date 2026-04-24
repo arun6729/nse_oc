@@ -168,7 +168,8 @@ def render_data():
             timestamp = data.get("records", {}).get("timestamp", "Unknown")
             
             pcr = round(total_pe_oi / total_ce_oi, 4) if total_ce_oi > 0 else 0
-            current_time = datetime.now().strftime('%H:%M:%S')
+            ist = ZoneInfo("Asia/Kolkata")
+            current_time = datetime.now(ist).strftime('%H:%M:%S')
             
             # --- History & % Change calculation ---
             if symbol not in st.session_state.history:

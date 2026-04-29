@@ -151,10 +151,14 @@ def render_data():
                     return f"{val}% ⚪"
                     
                 formatted_df = df.copy()
+                if not formatted_df.empty:
+                    formatted_df["Diff (CE - PE)"] = formatted_df["Total CE OI"] - formatted_df["Total PE OI"]
                 formatted_df["% CE Change"] = formatted_df["% CE Change"].apply(format_change)
                 formatted_df["% PE Change"] = formatted_df["% PE Change"].apply(format_change)
                 formatted_df["Total CE OI"] = formatted_df["Total CE OI"].apply(lambda x: f"{x:,}")
                 formatted_df["Total PE OI"] = formatted_df["Total PE OI"].apply(lambda x: f"{x:,}")
+                if "Diff (CE - PE)" in formatted_df.columns:
+                    formatted_df["Diff (CE - PE)"] = formatted_df["Diff (CE - PE)"].apply(lambda x: f"{x:,}")
                 st.dataframe(formatted_df, use_container_width=True, hide_index=True)
         return
 
@@ -264,10 +268,14 @@ def render_data():
 
             
             formatted_df = df.copy()
+            if not formatted_df.empty:
+                formatted_df["Diff (CE - PE)"] = formatted_df["Total CE OI"] - formatted_df["Total PE OI"]
             formatted_df["% CE Change"] = formatted_df["% CE Change"].apply(format_change)
             formatted_df["% PE Change"] = formatted_df["% PE Change"].apply(format_change)
             formatted_df["Total CE OI"] = formatted_df["Total CE OI"].apply(lambda x: f"{x:,}")
             formatted_df["Total PE OI"] = formatted_df["Total PE OI"].apply(lambda x: f"{x:,}")
+            if "Diff (CE - PE)" in formatted_df.columns:
+                formatted_df["Diff (CE - PE)"] = formatted_df["Diff (CE - PE)"].apply(lambda x: f"{x:,}")
             
             st.dataframe(formatted_df, use_container_width=True, hide_index=True)
 

@@ -63,11 +63,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # User inputs
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     symbol = st.selectbox("Select Index Symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
 with col2:
-    timeframe = st.selectbox("Select Refresh Timeframe", ["Manual", "3 Min", "5 Min", "15 Min"])
+    selected_date = st.date_input("Select Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
+
+is_historical = selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+with col3:
+    if is_historical:
+        hist_timeframe = st.selectbox("Historical Timeframe", ["All Data", "5 Min", "15 Min"])
+        timeframe = "Manual" # Force manual for historical mode
+    else:
+        timeframe = st.selectbox("Select Refresh Timeframe", ["Manual", "3 Min", "5 Min", "15 Min"])
 
 # Telegram Configuration Sidebar
 with st.sidebar:
@@ -163,6 +172,95 @@ def insert_to_supabase(symbol, record):
             
     except Exception as e:
         return False, str(e)
+
+def fetch_from_supabase_historical(symbol, date_str):
+    if "supabase" not in st.secrets:
+        return None
+    url = st.secrets["supabase"].get("url", "")
+    key = st.secrets["supabase"].get("key", "")
+    if not url or not key:
+        return None
+        
+    try:
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        
+        endpoint = f"{url}/rest/v1/nse_options_data?symbol=eq.{symbol}&date=eq.{date_str}&select=*&order=time.asc"
+        response = requests.get(endpoint, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception:
+        return None
+
+def render_historical_data(symbol, selected_date, timeframe):
+    st.write(f"### 🕰️ Historical Data for {symbol} on {selected_date}")
+    
+    with st.spinner(f"Fetching historical data from Supabase..."):
+        date_str = selected_date.strftime("%Y-%m-%d")
+        data = fetch_from_supabase_historical(symbol, date_str)
+        
+    if not data:
+        st.warning(f"No historical data found for {symbol} on {date_str}. (Or Supabase is not configured).")
+        return
+        
+    df = pd.DataFrame(data)
+    if df.empty:
+        st.warning(f"No records found for {symbol} on {date_str}.")
+        return
+        
+    # Rename columns to match existing table
+    rename_map = {
+        "time": "Time",
+        "symbol": "Symbol",
+        "total_ce_oi": "Total CE OI",
+        "ce_change_pct": "% CE Change",
+        "total_pe_oi": "Total PE OI",
+        "pe_change_pct": "% PE Change",
+        "pcr": "PCR",
+        "diff_ce_pe": "Diff (CE - PE)"
+    }
+    df = df.rename(columns=rename_map)
+    
+    if timeframe in ["5 Min", "15 Min"]:
+        # Resampling logic
+        df['datetime_str'] = df['date'] + ' ' + df['Time']
+        df['datetime'] = pd.to_datetime(df['datetime_str'], errors='coerce')
+        df.set_index('datetime', inplace=True)
+        
+        resample_str = '5min' if timeframe == "5 Min" else '15min'
+        
+        # Resample logic (last in window)
+        df_resampled = df.resample(resample_str).last().dropna(subset=['Total CE OI'])
+        
+        if df_resampled.empty:
+            st.warning("No data left after resampling.")
+            return
+            
+        df = df_resampled.reset_index()
+        # Keep only desired columns
+        df = df[['Time', 'Symbol', 'Total CE OI', '% CE Change', 'Total PE OI', '% PE Change', 'PCR', 'Diff (CE - PE)']]
+    else:
+        df = df[['Time', 'Symbol', 'Total CE OI', '% CE Change', 'Total PE OI', '% PE Change', 'PCR', 'Diff (CE - PE)']]
+
+    def format_change(val):
+        if pd.isna(val): return "0% ⚪"
+        if val > 0: return f"+{val}% 🟢"
+        elif val < 0: return f"{val}% 🔴"
+        return f"{val}% ⚪"
+
+    formatted_df = df.copy()
+    formatted_df["% CE Change"] = formatted_df["% CE Change"].apply(format_change)
+    formatted_df["% PE Change"] = formatted_df["% PE Change"].apply(format_change)
+    formatted_df["Total CE OI"] = formatted_df["Total CE OI"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else x)
+    formatted_df["Total PE OI"] = formatted_df["Total PE OI"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else x)
+    formatted_df["Diff (CE - PE)"] = formatted_df["Diff (CE - PE)"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else x)
+    
+    st.dataframe(formatted_df, use_container_width=True, hide_index=True)
 
 def get_nse_data(symbol):
     """Fetch live option chain data natively via Groww API which provides free unblocked NSE feeds."""
@@ -362,14 +460,20 @@ def render_data():
             st.dataframe(formatted_df, use_container_width=True, hide_index=True)
 
 # Render initial data or manual refresh
-if st.button("🔄 Refresh Data manually"):
-    render_data()
+if is_historical:
+    if st.button("🔄 Reload Historical Data"):
+        render_historical_data(symbol, selected_date, hist_timeframe)
+    else:
+        render_historical_data(symbol, selected_date, hist_timeframe)
 else:
-    # Initial render
-    render_data()
+    if st.button("🔄 Refresh Data manually"):
+        render_data()
+    else:
+        # Initial render
+        render_data()
 
 # Handle Auto-refresh timeframe logic
-if timeframe != "Manual":
+if not is_historical and timeframe != "Manual":
     if timeframe == "3 Min":
         interval = 3 * 60
     elif timeframe == "5 Min":

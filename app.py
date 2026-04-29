@@ -86,6 +86,9 @@ def send_telegram_alert(token, chat_id, message):
         response = requests.post(url, json=payload, timeout=5)
         if response.status_code != 200:
             st.sidebar.error("Failed to send Telegram message. Check credentials.")
+    except Exception as e:
+        st.sidebar.error(f"Telegram Error: {e}")
+
 # Supabase Configuration Sidebar
 with st.sidebar:
     st.header("🗄️ Supabase Storage")

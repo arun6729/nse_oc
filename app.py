@@ -197,6 +197,92 @@ def fetch_from_supabase_historical(symbol, date_str):
     except Exception:
         return None
 
+def style_df(df):
+    """
+    Format and style the DataFrame with premium styling and colors.
+    Positive values are colored green, negative values red.
+    """
+    if df.empty:
+        return df
+        
+    df_clean = df.copy()
+    
+    # Calculate derived columns if they don't exist
+    if "Total CE OI" in df_clean.columns and "Total PE OI" in df_clean.columns:
+        if "Chg in CE" not in df_clean.columns:
+            df_clean["Chg in CE"] = df_clean["Total CE OI"].diff().fillna(0).astype(int)
+        if "Chg in PE" not in df_clean.columns:
+            df_clean["Chg in PE"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
+        if "Diff of Chg (CE - PE)" not in df_clean.columns:
+            df_clean["Diff of Chg (CE - PE)"] = df_clean["Chg in CE"] - df_clean["Chg in PE"]
+        if "Diff (CE - PE)" not in df_clean.columns:
+            df_clean["Diff (CE - PE)"] = df_clean["Total CE OI"] - df_clean["Total PE OI"]
+            
+    # Reorder columns to a perfect layout
+    desired_cols = [
+        'Time', 'Symbol', 
+        'Total CE OI', 'Chg in CE', '% CE Change', 
+        'Total PE OI', 'Chg in PE', '% PE Change', 
+        'PCR', 'Diff (CE - PE)', 'Diff of Chg (CE - PE)'
+    ]
+    existing_cols = [c for c in desired_cols if c in df_clean.columns]
+    for c in df_clean.columns:
+        if c not in existing_cols:
+            existing_cols.append(c)
+    df_clean = df_clean[existing_cols]
+    
+    # We will use pandas styler to format and color
+    styler = df_clean.style
+    
+    # Define color function based on cell values
+    def get_color(val):
+        try:
+            num = float(val)
+            if num > 0:
+                return 'color: #00C853; font-weight: bold;'
+            elif num < 0:
+                return 'color: #FF4B4B; font-weight: bold;'
+        except (ValueError, TypeError):
+            pass
+        return 'color: #E0E0E0;'
+
+    # Apply colors to change columns
+    change_cols = ['Chg in CE', '% CE Change', 'Chg in PE', '% PE Change', 'Diff of Chg (CE - PE)']
+    cols_to_color = [c for c in change_cols if c in df_clean.columns]
+    
+    if cols_to_color:
+        if hasattr(styler, 'map'):
+            styler = styler.map(get_color, subset=cols_to_color)
+        else:
+            styler = styler.applymap(get_color, subset=cols_to_color)
+            
+    # Format functions for clean display
+    format_dict = {}
+    if "Total CE OI" in df_clean.columns:
+        format_dict["Total CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Total PE OI" in df_clean.columns:
+        format_dict["Total PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Diff (CE - PE)" in df_clean.columns:
+        format_dict["Diff (CE - PE)"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "PCR" in df_clean.columns:
+        format_dict["PCR"] = lambda x: f"{x:.4f}" if pd.notna(x) else ""
+        
+    # Formatting for change columns to have standard +, - and emoji signs
+    if "Chg in CE" in df_clean.columns:
+        format_dict["Chg in CE"] = lambda x: f"+{int(x):,} 🟢" if x > 0 else (f"{int(x):,} 🔴" if x < 0 else "0 ⚪")
+    if "Chg in PE" in df_clean.columns:
+        format_dict["Chg in PE"] = lambda x: f"+{int(x):,} 🟢" if x > 0 else (f"{int(x):,} 🔴" if x < 0 else "0 ⚪")
+    if "Diff of Chg (CE - PE)" in df_clean.columns:
+        format_dict["Diff of Chg (CE - PE)"] = lambda x: f"+{int(x):,} 🟢" if x > 0 else (f"{int(x):,} 🔴" if x < 0 else "0 ⚪")
+        
+    if "% CE Change" in df_clean.columns:
+        format_dict["% CE Change"] = lambda x: f"+{x:.2f}% 🟢" if x > 0 else (f"{x:.2f}% 🔴" if x < 0 else "0.00% ⚪")
+    if "% PE Change" in df_clean.columns:
+        format_dict["% PE Change"] = lambda x: f"+{x:.2f}% 🟢" if x > 0 else (f"{x:.2f}% 🔴" if x < 0 else "0.00% ⚪")
+        
+    styler = styler.format(format_dict)
+    return styler
+
 def render_historical_data(symbol, selected_date, timeframe):
     st.write(f"### 🕰️ Historical Data for {symbol} on {selected_date}")
     
@@ -242,25 +328,9 @@ def render_historical_data(symbol, selected_date, timeframe):
             return
             
         df = df_resampled.reset_index()
-        # Keep only desired columns
-        df = df[['Time', 'Symbol', 'Total CE OI', '% CE Change', 'Total PE OI', '% PE Change', 'PCR', 'Diff (CE - PE)']]
-    else:
-        df = df[['Time', 'Symbol', 'Total CE OI', '% CE Change', 'Total PE OI', '% PE Change', 'PCR', 'Diff (CE - PE)']]
-
-    def format_change(val):
-        if pd.isna(val): return "0% ⚪"
-        if val > 0: return f"+{val}% 🟢"
-        elif val < 0: return f"{val}% 🔴"
-        return f"{val}% ⚪"
-
-    formatted_df = df.copy()
-    formatted_df["% CE Change"] = formatted_df["% CE Change"].apply(format_change)
-    formatted_df["% PE Change"] = formatted_df["% PE Change"].apply(format_change)
-    formatted_df["Total CE OI"] = formatted_df["Total CE OI"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else x)
-    formatted_df["Total PE OI"] = formatted_df["Total PE OI"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else x)
-    formatted_df["Diff (CE - PE)"] = formatted_df["Diff (CE - PE)"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else x)
-    
-    st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+        
+    styled_df = style_df(df)
+    st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 def get_nse_data(symbol):
     """Fetch live option chain data natively via Groww API which provides free unblocked NSE feeds."""
@@ -317,22 +387,8 @@ def render_data():
             if symbol in st.session_state.history and len(st.session_state.history[symbol]) > 0:
                 st.markdown("### 📊 Historical Data Updates (Last session)")
                 df = pd.DataFrame(st.session_state.history[symbol])
-                
-                def format_change(val):
-                    if val > 0: return f"+{val}% 🟢"
-                    elif val < 0: return f"{val}% 🔴"
-                    return f"{val}% ⚪"
-                    
-                formatted_df = df.copy()
-                if not formatted_df.empty:
-                    formatted_df["Diff (CE - PE)"] = formatted_df["Total CE OI"] - formatted_df["Total PE OI"]
-                formatted_df["% CE Change"] = formatted_df["% CE Change"].apply(format_change)
-                formatted_df["% PE Change"] = formatted_df["% PE Change"].apply(format_change)
-                formatted_df["Total CE OI"] = formatted_df["Total CE OI"].apply(lambda x: f"{x:,}")
-                formatted_df["Total PE OI"] = formatted_df["Total PE OI"].apply(lambda x: f"{x:,}")
-                if "Diff (CE - PE)" in formatted_df.columns:
-                    formatted_df["Diff (CE - PE)"] = formatted_df["Diff (CE - PE)"].apply(lambda x: f"{x:,}")
-                st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+                styled_df = style_df(df)
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
         return
 
     with data_placeholder.container():
@@ -445,19 +501,8 @@ def render_data():
             # Render History Table
             st.markdown("### 📊 Historical Data Updates")
             df = pd.DataFrame(symbol_history)
-
-            
-            formatted_df = df.copy()
-            if not formatted_df.empty:
-                formatted_df["Diff (CE - PE)"] = formatted_df["Total CE OI"] - formatted_df["Total PE OI"]
-            formatted_df["% CE Change"] = formatted_df["% CE Change"].apply(format_change)
-            formatted_df["% PE Change"] = formatted_df["% PE Change"].apply(format_change)
-            formatted_df["Total CE OI"] = formatted_df["Total CE OI"].apply(lambda x: f"{x:,}")
-            formatted_df["Total PE OI"] = formatted_df["Total PE OI"].apply(lambda x: f"{x:,}")
-            if "Diff (CE - PE)" in formatted_df.columns:
-                formatted_df["Diff (CE - PE)"] = formatted_df["Diff (CE - PE)"].apply(lambda x: f"{x:,}")
-            
-            st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+            styled_df = style_df(df)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # Render initial data or manual refresh
 if is_historical:

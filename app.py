@@ -4,6 +4,102 @@ import time
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 import pandas as pd
+import sqlite3
+import os
+
+DB_FILE = "nse_data.db"
+
+def init_sqlite_db():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS nse_options_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                total_ce_oi INTEGER,
+                ce_change_pct REAL,
+                total_pe_oi INTEGER,
+                pe_change_pct REAL,
+                pcr REAL,
+                diff_ce_pe INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Failed to initialize SQLite Database: {e}")
+
+# Initialize local SQLite DB on startup
+init_sqlite_db()
+
+def insert_to_sqlite(symbol, record):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        date_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+        
+        cursor.execute("""
+            INSERT INTO nse_options_data (
+                date, time, symbol, total_ce_oi, ce_change_pct, total_pe_oi, pe_change_pct, pcr, diff_ce_pe
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            date_str,
+            record.get("Time", ""),
+            symbol,
+            record.get("Total CE OI", 0),
+            record.get("% CE Change", 0.0),
+            record.get("Total PE OI", 0),
+            record.get("% PE Change", 0.0),
+            record.get("PCR", 0.0),
+            record.get("Total CE OI", 0) - record.get("Total PE OI", 0)
+        ))
+        conn.commit()
+        conn.close()
+        return True, "Success"
+    except Exception as e:
+        return False, str(e)
+
+def fetch_from_sqlite_historical(symbol, date_str):
+    try:
+        if not os.path.exists(DB_FILE):
+            return []
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                date, time, symbol, 
+                total_ce_oi, ce_change_pct, 
+                total_pe_oi, pe_change_pct, 
+                pcr, diff_ce_pe 
+            FROM nse_options_data 
+            WHERE symbol = ? AND date = ? 
+            ORDER BY time ASC
+        """, (symbol.upper(), date_str))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        result = []
+        for r in rows:
+            result.append({
+                "date": r["date"],
+                "time": r["time"],
+                "symbol": r["symbol"],
+                "total_ce_oi": r["total_ce_oi"],
+                "ce_change_pct": r["ce_change_pct"],
+                "total_pe_oi": r["total_pe_oi"],
+                "pe_change_pct": r["pe_change_pct"],
+                "pcr": r["pcr"],
+                "diff_ce_pe": r["diff_ce_pe"]
+            })
+        return result
+    except Exception as e:
+        st.error(f"SQLite Read Error: {e}")
+        return []
 
 def is_market_open():
     ist = ZoneInfo("Asia/Kolkata")
@@ -31,6 +127,41 @@ def is_market_open():
         return False, "Market is closed today (NSE Holiday)."
         
     return True, "Market is open."
+
+def fetch_historical_data(symbol, date_str):
+    # Try Supabase first if configured
+    data = None
+    if "supabase" in st.secrets:
+        url = st.secrets["supabase"].get("url", "")
+        key = st.secrets["supabase"].get("key", "")
+        if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
+            data = fetch_from_supabase_historical(symbol, date_str)
+            
+    # If no data or not configured, load from local SQLite
+    if not data:
+        data = fetch_from_sqlite_historical(symbol, date_str)
+        
+    return data
+
+def load_today_history(symbol):
+    """Load today's already-saved records from SQLite/Supabase to initialize the session state history."""
+    if symbol not in st.session_state.history or not st.session_state.history[symbol]:
+        today_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+        historical_records = fetch_historical_data(symbol, today_str)
+        
+        session_history = []
+        if historical_records:
+            for r in historical_records:
+                session_history.append({
+                    "Time": r.get("time", ""),
+                    "Symbol": r.get("symbol", ""),
+                    "Total CE OI": r.get("total_ce_oi", 0),
+                    "% CE Change": r.get("ce_change_pct", 0.0),
+                    "Total PE OI": r.get("total_pe_oi", 0),
+                    "% PE Change": r.get("pe_change_pct", 0.0),
+                    "PCR": r.get("pcr", 0.0)
+                })
+        st.session_state.history[symbol] = session_history
 
 # Initialize session state for history
 if "history" not in st.session_state:
@@ -78,6 +209,21 @@ with col3:
     else:
         timeframe = st.selectbox("Select Refresh Timeframe", ["Manual", "3 Min", "5 Min", "15 Min"])
 
+# Pre-populate session state history from SQLite/Supabase for today's selected symbol
+if symbol not in st.session_state.history:
+    st.session_state.history[symbol] = []
+if not is_historical:
+    load_today_history(symbol)
+
+# General Settings Sidebar
+with st.sidebar:
+    st.header("⚙️ Settings")
+    bypass_market_hours = st.checkbox(
+        "Bypass Market Hours", 
+        value=False, 
+        help="Bypass the trading hours restriction (9:15 AM - 3:30 PM IST) to fetch and test the automatic refresh timer anytime."
+    )
+
 # Telegram Configuration Sidebar
 with st.sidebar:
     st.header("📲 Telegram Bot Integration")
@@ -98,12 +244,17 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         st.sidebar.error(f"Telegram Error: {e}")
 
-# Supabase Configuration Sidebar
+# Database Configuration Sidebar
 with st.sidebar:
-    st.header("🗄️ Supabase Storage")
-    if "supabase" not in st.secrets or "url" not in st.secrets["supabase"] or "key" not in st.secrets["supabase"]:
-        st.warning("Supabase is NOT configured.")
-        with st.expander("How to Setup"):
+    st.header("🗄️ Database Storage")
+    
+    # SQLite local DB (Always Active)
+    st.success("💾 SQLite Local DB: Active (nse_data.db)")
+    
+    # Supabase cloud DB (Optional Setup)
+    if "supabase" not in st.secrets or "url" not in st.secrets["supabase"] or "key" not in st.secrets["supabase"] or st.secrets["supabase"]["url"] == "YOUR_SUPABASE_URL":
+        st.info("☁️ Supabase Cloud: Not configured.")
+        with st.expander("How to Setup Cloud Sync"):
             st.markdown("""
             1. Create a project on [Supabase](https://supabase.com/).
             2. Go to the SQL Editor and run this query to create the table:
@@ -130,7 +281,7 @@ with st.sidebar:
             ```
             """)
     else:
-        st.success("Supabase configured! Data will be saved automatically.")
+        st.success("☁️ Supabase Cloud: Configured & Syncing")
 
 def insert_to_supabase(symbol, record):
     if "supabase" not in st.secrets:
@@ -286,12 +437,12 @@ def style_df(df):
 def render_historical_data(symbol, selected_date, timeframe):
     st.write(f"### 🕰️ Historical Data for {symbol} on {selected_date}")
     
-    with st.spinner(f"Fetching historical data from Supabase..."):
+    with st.spinner(f"Fetching historical data..."):
         date_str = selected_date.strftime("%Y-%m-%d")
-        data = fetch_from_supabase_historical(symbol, date_str)
+        data = fetch_historical_data(symbol, date_str)
         
     if not data:
-        st.warning(f"No historical data found for {symbol} on {date_str}. (Or Supabase is not configured).")
+        st.warning(f"No historical data found for {symbol} on {date_str} in either local SQLite or Supabase database.")
         return
         
     df = pd.DataFrame(data)
@@ -331,6 +482,18 @@ def render_historical_data(symbol, selected_date, timeframe):
         
     styled_df = style_df(df)
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+    # Render Historical Trend Charts
+    if not df.empty and len(df) > 1:
+        chart_df = df.copy()
+        if "Time" in chart_df.columns and "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
+            chart_df = chart_df.set_index("Time")
+            st.markdown("### 📈 Open Interest (OI) Trend Analysis")
+            st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=300)
+            
+            if "PCR" in chart_df.columns:
+                st.markdown("### 📊 Put-Call Ratio (PCR) Trend")
+                st.line_chart(chart_df["PCR"], height=200)
 
 def get_nse_data(symbol):
     """Fetch live option chain data natively via Groww API which provides free unblocked NSE feeds."""
@@ -377,9 +540,9 @@ def get_nse_data(symbol):
 # Placeholder for data
 data_placeholder = st.empty()
 
-def render_data():
+def render_data(bypass_market=False):
     is_open, msg = is_market_open()
-    if not is_open:
+    if not is_open and not bypass_market:
         with data_placeholder.container():
             st.warning(f"⚠️ {msg}")
             
@@ -442,12 +605,22 @@ def render_data():
             symbol_history.append(new_record)
             st.session_state.history[symbol] = symbol_history
             
-            # --- Supabase Dispatch ---
+            # --- SQLite & Supabase Dispatch ---
+            sqlite_success, sqlite_msg = insert_to_sqlite(symbol, new_record)
             sb_success, sb_msg = insert_to_supabase(symbol, new_record)
+            
+            status_text = []
+            if sqlite_success:
+                status_text.append("💾 Local SQLite synced")
+            else:
+                status_text.append(f"💾 SQLite Error: {sqlite_msg}")
+                
             if sb_success:
-                st.session_state[f"sb_status_{symbol}"] = "Data synced to Supabase"
+                status_text.append("☁️ Supabase synced")
             elif sb_msg != "Not Configured":
-                st.session_state[f"sb_status_{symbol}"] = f"SB Error: {sb_msg}"
+                status_text.append(f"☁️ Supabase Error: {sb_msg}")
+                
+            st.session_state[f"sync_status_{symbol}"] = " | ".join(status_text)
             
             # --- Telegram Dispatch ---
             if enable_telegram and bot_token and chat_id:
@@ -466,6 +639,7 @@ def render_data():
             # --- Rendering ---
             st.write(f"**Last Updated (NSE Server):** {timestamp}")
             st.write(f"**Local Refresh Time:** {current_time}")
+            st.info(f"⚙️ **Sync Status:** `{st.session_state.get(f'sync_status_{symbol}', '💾 Local SQLite synced')}`")
             
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -504,6 +678,18 @@ def render_data():
             styled_df = style_df(df)
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
+            # Render Live Trend Charts
+            if not df.empty and len(df) > 1:
+                chart_df = df.copy()
+                if "Time" in chart_df.columns and "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
+                    chart_df = chart_df.set_index("Time")
+                    st.markdown("### 📈 Open Interest (OI) Trend Analysis")
+                    st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=300)
+                    
+                    if "PCR" in chart_df.columns:
+                        st.markdown("### 📊 Put-Call Ratio (PCR) Trend")
+                        st.line_chart(chart_df["PCR"], height=200)
+
 # Render initial data or manual refresh
 if is_historical:
     if st.button("🔄 Reload Historical Data"):
@@ -512,10 +698,10 @@ if is_historical:
         render_historical_data(symbol, selected_date, hist_timeframe)
 else:
     if st.button("🔄 Refresh Data manually"):
-        render_data()
+        render_data(bypass_market=bypass_market_hours)
     else:
         # Initial render
-        render_data()
+        render_data(bypass_market=bypass_market_hours)
 
 # Handle Auto-refresh timeframe logic
 if not is_historical and timeframe != "Manual":
@@ -527,9 +713,25 @@ if not is_historical and timeframe != "Manual":
         interval = 15 * 60
         
     is_open, _ = is_market_open()
-    if not is_open:
+    if not is_open and not bypass_market_hours:
         # If market closed, poll less frequently to save resources, but keep alive
         interval = max(interval, 5 * 60)
         
-    time.sleep(interval)
+    # We will show a nice countdown widget in the sidebar
+    countdown_placeholder = st.sidebar.empty()
+    
+    # Run the countdown
+    for remaining in range(interval, 0, -1):
+        mins, secs = divmod(remaining, 60)
+        countdown_placeholder.markdown(
+            f"""
+            <div style="background-color: #1E1E2E; padding: 15px; border-radius: 8px; border: 1px solid #3E3E5E; text-align: center; margin-top: 15px;">
+                <span style="font-size: 0.9rem; color: #B0B0C0; display: block; margin-bottom: 5px;">⏱️ Next Auto-Refresh</span>
+                <span style="font-size: 1.8rem; font-weight: bold; color: #00C853; font-family: monospace;">{mins:02d}:{secs:02d}</span>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+        time.sleep(1)
+        
     st.rerun()

@@ -7,6 +7,67 @@ import pandas as pd
 import sqlite3
 import os
 
+# --- Robust Secrets Fallback Loader ---
+def get_supabase_secrets():
+    # 1. Try st.secrets first
+    try:
+        if "supabase" in st.secrets:
+            sb = st.secrets["supabase"]
+            url = sb.get("url", "")
+            key = sb.get("key", "")
+            if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
+                return {"url": url, "key": key}
+    except Exception:
+        pass
+        
+    # 2. Try manual loading fallback
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        secrets_path = os.path.join(script_dir, ".streamlit", "secrets.toml")
+        if os.path.exists(secrets_path):
+            try:
+                import tomllib
+                with open(secrets_path, "rb") as f:
+                    toml_data = tomllib.load(f)
+            except ImportError:
+                import toml
+                with open(secrets_path, "r") as f:
+                    toml_data = toml.load(f)
+            if "supabase" in toml_data:
+                sb = toml_data["supabase"]
+                url = sb.get("url", "")
+                key = sb.get("key", "")
+                if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
+                    return {"url": url, "key": key}
+    except Exception:
+        # Emergency regex-based parsing if modules are missing
+        try:
+            secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
+            if os.path.exists(secrets_path):
+                with open(secrets_path, "r") as f:
+                    lines = f.readlines()
+                sb_data = {}
+                in_supabase = False
+                for line in lines:
+                    line_str = line.strip()
+                    if line_str == "[supabase]":
+                        in_supabase = True
+                        continue
+                    elif line_str.startswith("["):
+                        in_supabase = False
+                    if in_supabase and "=" in line_str:
+                        k, v = line_str.split("=", 1)
+                        sb_data[k.strip()] = v.strip().strip('"').strip("'")
+                if sb_data:
+                    url = sb_data.get("url", "")
+                    key = sb_data.get("key", "")
+                    if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
+                        return {"url": url, "key": key}
+        except Exception:
+            pass
+            
+    return None
+
 DB_FILE = "nse_data.db"
 
 def init_sqlite_db():
@@ -101,6 +162,69 @@ def fetch_from_sqlite_historical(symbol, date_str):
         st.error(f"SQLite Read Error: {e}")
         return []
 
+def insert_to_supabase(symbol, record):
+    sb_secrets = get_supabase_secrets()
+    if not sb_secrets:
+        return False, "Not Configured"
+    url = sb_secrets.get("url", "")
+    key = sb_secrets.get("key", "")
+        
+    try:
+        date_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+        
+        data = {
+            "date": date_str,
+            "time": record.get("Time", ""),
+            "symbol": symbol.upper(),
+            "total_ce_oi": record.get("Total CE OI", 0),
+            "ce_change_pct": record.get("% CE Change", 0),
+            "total_pe_oi": record.get("Total PE OI", 0),
+            "pe_change_pct": record.get("% PE Change", 0),
+            "pcr": record.get("PCR", 0),
+            "diff_ce_pe": record.get("Total CE OI", 0) - record.get("Total PE OI", 0)
+        }
+        
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        
+        endpoint = f"{url}/rest/v1/nse_options_data"
+        response = requests.post(endpoint, headers=headers, json=data, timeout=5)
+        
+        if response.status_code in (200, 201, 204):
+            return True, "Success"
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+            
+    except Exception as e:
+        return False, str(e)
+
+def fetch_from_supabase_historical(symbol, date_str):
+    sb_secrets = get_supabase_secrets()
+    if not sb_secrets:
+        return None
+    url = sb_secrets.get("url", "")
+    key = sb_secrets.get("key", "")
+        
+    try:
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        
+        endpoint = f"{url}/rest/v1/nse_options_data?symbol=eq.{symbol.upper()}&date=eq.{date_str}&select=*&order=time.asc"
+        response = requests.get(endpoint, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception:
+        return None
+
 def is_market_open():
     ist = ZoneInfo("Asia/Kolkata")
     now = datetime.now(ist)
@@ -128,26 +252,37 @@ def is_market_open():
         
     return True, "Market is open."
 
-def fetch_historical_data(symbol, date_str):
-    # Try Supabase first if configured
+def fetch_historical_data(symbol, date_str, db_source="Auto (Supabase -> SQLite)"):
     data = None
-    if "supabase" in st.secrets:
-        url = st.secrets["supabase"].get("url", "")
-        key = st.secrets["supabase"].get("key", "")
-        if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
-            data = fetch_from_supabase_historical(symbol, date_str)
+    
+    # 1. Query Supabase if selected
+    if db_source in ["Auto (Supabase -> SQLite)", "Supabase Cloud Only"]:
+        sb_secrets = get_supabase_secrets()
+        if sb_secrets:
+            url = sb_secrets.get("url", "")
+            key = sb_secrets.get("key", "")
+            if url and key:
+                data = fetch_from_supabase_historical(symbol, date_str)
+                if data:
+                    st.toast("⚡ Retrieved historical data from Supabase Cloud!")
+                    
+    # 2. Query SQLite if selected or if Supabase query returned no data
+    if db_source in ["Auto (Supabase -> SQLite)", "Local SQLite Only"] or (db_source == "Auto (Supabase -> SQLite)" and not data):
+        sqlite_data = fetch_from_sqlite_historical(symbol, date_str)
+        if sqlite_data:
+            data = sqlite_data
+            if db_source == "Auto (Supabase -> SQLite)":
+                st.toast("💾 Supabase empty/unconfigured. Loaded from Local SQLite.")
+            else:
+                st.toast("💾 Retrieved historical data from Local SQLite!")
             
-    # If no data or not configured, load from local SQLite
-    if not data:
-        data = fetch_from_sqlite_historical(symbol, date_str)
-        
     return data
 
-def load_today_history(symbol):
+def load_today_history(symbol, db_source="Auto (Supabase -> SQLite)"):
     """Load today's already-saved records from SQLite/Supabase to initialize the session state history."""
     if symbol not in st.session_state.history or not st.session_state.history[symbol]:
         today_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
-        historical_records = fetch_historical_data(symbol, today_str)
+        historical_records = fetch_historical_data(symbol, today_str, db_source)
         
         session_history = []
         if historical_records:
@@ -193,29 +328,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# User inputs
-col1, col2, col3 = st.columns(3)
-with col1:
-    symbol = st.selectbox("Select Index Symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
-with col2:
-    selected_date = st.date_input("Select Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
-
-is_historical = selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-with col3:
-    if is_historical:
-        hist_timeframe = st.selectbox("Historical Timeframe", ["All Data", "5 Min", "15 Min"])
-        timeframe = "Manual" # Force manual for historical mode
-    else:
-        timeframe = st.selectbox("Select Refresh Timeframe", ["Manual", "3 Min", "5 Min", "15 Min"])
-
-# Pre-populate session state history from SQLite/Supabase for today's selected symbol
-if symbol not in st.session_state.history:
-    st.session_state.history[symbol] = []
-if not is_historical:
-    load_today_history(symbol)
-
-# General Settings Sidebar
+# --- Unified Sidebar Configuration ---
 with st.sidebar:
     st.header("⚙️ Settings")
     bypass_market_hours = st.checkbox(
@@ -224,35 +337,19 @@ with st.sidebar:
         help="Bypass the trading hours restriction (9:15 AM - 3:30 PM IST) to fetch and test the automatic refresh timer anytime."
     )
 
-# Telegram Configuration Sidebar
-with st.sidebar:
     st.header("📲 Telegram Bot Integration")
     st.markdown("Set up Telegram credentials to receive data directly in your chats on every update.")
     bot_token = st.text_input("Bot API Token", type="password", help="Get this from @BotFather")
     chat_id = st.text_input("Chat ID", help="The numeric ID of your chat or channel")
     enable_telegram = st.checkbox("Enable Alerts on Refresh")
     
-def send_telegram_alert(token, chat_id, message):
-    if not token or not chat_id:
-        return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-        if response.status_code != 200:
-            st.sidebar.error("Failed to send Telegram message. Check credentials.")
-    except Exception as e:
-        st.sidebar.error(f"Telegram Error: {e}")
-
-# Database Configuration Sidebar
-with st.sidebar:
     st.header("🗄️ Database Storage")
-    
     # SQLite local DB (Always Active)
     st.success("💾 SQLite Local DB: Active (nse_data.db)")
     
     # Supabase cloud DB (Optional Setup)
-    if "supabase" not in st.secrets or "url" not in st.secrets["supabase"] or "key" not in st.secrets["supabase"] or st.secrets["supabase"]["url"] == "YOUR_SUPABASE_URL":
+    sb_secrets = get_supabase_secrets()
+    if not sb_secrets:
         st.info("☁️ Supabase Cloud: Not configured.")
         with st.expander("How to Setup Cloud Sync"):
             st.markdown("""
@@ -283,70 +380,48 @@ with st.sidebar:
     else:
         st.success("☁️ Supabase Cloud: Configured & Syncing")
 
-def insert_to_supabase(symbol, record):
-    if "supabase" not in st.secrets:
-        return False, "Not Configured"
-    url = st.secrets["supabase"].get("url", "")
-    key = st.secrets["supabase"].get("key", "")
-    if not url or not key:
-        return False, "Not Configured"
-        
-    try:
-        date_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
-        
-        data = {
-            "date": date_str,
-            "time": record.get("Time", ""),
-            "symbol": symbol,
-            "total_ce_oi": record.get("Total CE OI", 0),
-            "ce_change_pct": record.get("% CE Change", 0),
-            "total_pe_oi": record.get("Total PE OI", 0),
-            "pe_change_pct": record.get("% PE Change", 0),
-            "pcr": record.get("PCR", 0),
-            "diff_ce_pe": record.get("Total CE OI", 0) - record.get("Total PE OI", 0)
-        }
-        
-        headers = {
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-        
-        endpoint = f"{url}/rest/v1/nse_options_data"
-        response = requests.post(endpoint, headers=headers, json=data, timeout=5)
-        
-        if response.status_code in (200, 201):
-            return True, "Success"
-        else:
-            return False, f"HTTP {response.status_code}: {response.text}"
-            
-    except Exception as e:
-        return False, str(e)
+    st.markdown("---")
+    st.header("🔍 Historical Query Source")
+    db_source = st.radio(
+        "Select Historical Query Source",
+        options=["Auto (Supabase -> SQLite)", "Supabase Cloud Only", "Local SQLite Only"],
+        index=0,
+        help="Choose where to query historical data from."
+    )
 
-def fetch_from_supabase_historical(symbol, date_str):
-    if "supabase" not in st.secrets:
-        return None
-    url = st.secrets["supabase"].get("url", "")
-    key = st.secrets["supabase"].get("key", "")
-    if not url or not key:
-        return None
-        
+def send_telegram_alert(token, chat_id, message):
+    if not token or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
-        headers = {
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-        
-        endpoint = f"{url}/rest/v1/nse_options_data?symbol=eq.{symbol}&date=eq.{date_str}&select=*&order=time.asc"
-        response = requests.get(endpoint, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception:
-        return None
+        response = requests.post(url, json=payload, timeout=5)
+        if response.status_code != 200:
+            st.sidebar.error("Failed to send Telegram message. Check credentials.")
+    except Exception as e:
+        st.sidebar.error(f"Telegram Error: {e}")
+
+# User inputs
+col1, col2, col3 = st.columns(3)
+with col1:
+    symbol = st.selectbox("Select Index Symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
+with col2:
+    selected_date = st.date_input("Select Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
+
+is_historical = selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+with col3:
+    if is_historical:
+        hist_timeframe = st.selectbox("Historical Timeframe", ["All Data", "5 Min", "15 Min"])
+        timeframe = "Manual" # Force manual for historical mode
+    else:
+        timeframe = st.selectbox("Select Refresh Timeframe", ["Manual", "3 Min", "5 Min", "15 Min"])
+
+# Pre-populate session state history from SQLite/Supabase for today's selected symbol
+if symbol not in st.session_state.history:
+    st.session_state.history[symbol] = []
+if not is_historical:
+    load_today_history(symbol, db_source)
 
 def style_df(df):
     """
@@ -434,12 +509,12 @@ def style_df(df):
     styler = styler.format(format_dict)
     return styler
 
-def render_historical_data(symbol, selected_date, timeframe):
+def render_historical_data(symbol, selected_date, timeframe, db_source="Auto (Supabase -> SQLite)"):
     st.write(f"### 🕰️ Historical Data for {symbol} on {selected_date}")
     
     with st.spinner(f"Fetching historical data..."):
         date_str = selected_date.strftime("%Y-%m-%d")
-        data = fetch_historical_data(symbol, date_str)
+        data = fetch_historical_data(symbol, date_str, db_source)
         
     if not data:
         st.warning(f"No historical data found for {symbol} on {date_str} in either local SQLite or Supabase database.")
@@ -495,11 +570,17 @@ def render_historical_data(symbol, selected_date, timeframe):
                 st.markdown("### 📊 Put-Call Ratio (PCR) Trend")
                 st.line_chart(chart_df["PCR"], height=200)
 
+GROWW_SYMBOL_MAP = {
+    "NIFTY": "nifty",
+    "BANKNIFTY": "nifty-bank",
+    "FINNIFTY": "nifty-financial-services",
+    "MIDCPNIFTY": "nifty-midcap-select"
+}
+
 def get_nse_data(symbol):
     """Fetch live option chain data natively via Groww API which provides free unblocked NSE feeds."""
-    # Ensure lowercase symbol for Groww API
-    symbol = symbol.lower()
-    url = f"https://groww.in/v1/api/option_chain_service/v1/option_chain/{symbol}?expiry=latest"
+    groww_sym = GROWW_SYMBOL_MAP.get(symbol.upper(), symbol.lower())
+    url = f"https://groww.in/v1/api/option_chain_service/v1/option_chain/{groww_sym}?expiry=latest"
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -693,9 +774,9 @@ def render_data(bypass_market=False):
 # Render initial data or manual refresh
 if is_historical:
     if st.button("🔄 Reload Historical Data"):
-        render_historical_data(symbol, selected_date, hist_timeframe)
+        render_historical_data(symbol, selected_date, hist_timeframe, db_source)
     else:
-        render_historical_data(symbol, selected_date, hist_timeframe)
+        render_historical_data(symbol, selected_date, hist_timeframe, db_source)
 else:
     if st.button("🔄 Refresh Data manually"):
         render_data(bypass_market=bypass_market_hours)

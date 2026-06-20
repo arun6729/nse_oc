@@ -26,3 +26,6 @@ htmlcov/
 .nox/
 .stfolder
 .streamlit/credentials.toml
+.streamlit/secrets.toml
+nse_data.db
+scratch/

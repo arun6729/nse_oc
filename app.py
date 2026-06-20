@@ -8,6 +8,64 @@ import sqlite3
 import os
 
 # --- Robust Secrets Fallback Loader ---
+def _load_toml_secrets():
+    """Load the full secrets.toml as a dict, using tomllib or toml fallback."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    secrets_path = os.path.join(script_dir, ".streamlit", "secrets.toml")
+    if not os.path.exists(secrets_path):
+        return {}
+    try:
+        import tomllib
+        with open(secrets_path, "rb") as f:
+            return tomllib.load(f)
+    except ImportError:
+        pass
+    try:
+        import toml
+        with open(secrets_path, "r") as f:
+            return toml.load(f)
+    except Exception:
+        pass
+    # Regex-based fallback
+    try:
+        with open(secrets_path, "r") as f:
+            lines = f.readlines()
+        result = {}
+        section = None
+        for line in lines:
+            line_str = line.strip()
+            if line_str.startswith("[") and line_str.endswith("]"):
+                section = line_str[1:-1]
+                result.setdefault(section, {})
+            elif section and "=" in line_str and not line_str.startswith("#"):
+                k, v = line_str.split("=", 1)
+                result[section][k.strip()] = v.strip().strip('"').strip("'")
+        return result
+    except Exception:
+        return {}
+
+def _save_toml_section(section_name, kv_dict):
+    """Write or update a [section] block inside secrets.toml."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    secrets_path = os.path.join(script_dir, ".streamlit", "secrets.toml")
+    try:
+        existing = _load_toml_secrets()
+        existing.setdefault(section_name, {})
+        existing[section_name].update(kv_dict)
+        # Rebuild the file content manually so we preserve comments in other sections
+        lines_out = []
+        for sec, vals in existing.items():
+            lines_out.append(f"[{sec}]\n")
+            for k, v in vals.items():
+                lines_out.append(f'{k} = "{v}"\n')
+            lines_out.append("\n")
+        os.makedirs(os.path.dirname(secrets_path), exist_ok=True)
+        with open(secrets_path, "w") as f:
+            f.writelines(lines_out)
+        return True
+    except Exception as e:
+        return False
+
 def get_supabase_secrets():
     # 1. Try st.secrets first
     try:
@@ -19,53 +77,36 @@ def get_supabase_secrets():
                 return {"url": url, "key": key}
     except Exception:
         pass
-        
-    # 2. Try manual loading fallback
+    # 2. Manual fallback
+    toml_data = _load_toml_secrets()
+    if "supabase" in toml_data:
+        sb = toml_data["supabase"]
+        url = sb.get("url", "")
+        key = sb.get("key", "")
+        if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
+            return {"url": url, "key": key}
+    return None
+
+def get_telegram_secrets():
+    """Load persisted Telegram bot_token and chat_id from secrets."""
+    # 1. Try st.secrets first
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        secrets_path = os.path.join(script_dir, ".streamlit", "secrets.toml")
-        if os.path.exists(secrets_path):
-            try:
-                import tomllib
-                with open(secrets_path, "rb") as f:
-                    toml_data = tomllib.load(f)
-            except ImportError:
-                import toml
-                with open(secrets_path, "r") as f:
-                    toml_data = toml.load(f)
-            if "supabase" in toml_data:
-                sb = toml_data["supabase"]
-                url = sb.get("url", "")
-                key = sb.get("key", "")
-                if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
-                    return {"url": url, "key": key}
+        if "telegram" in st.secrets:
+            tg = st.secrets["telegram"]
+            token = tg.get("bot_token", "")
+            cid = tg.get("chat_id", "")
+            if token and cid and token != "YOUR_BOT_TOKEN":
+                return {"bot_token": token, "chat_id": cid}
     except Exception:
-        # Emergency regex-based parsing if modules are missing
-        try:
-            secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
-            if os.path.exists(secrets_path):
-                with open(secrets_path, "r") as f:
-                    lines = f.readlines()
-                sb_data = {}
-                in_supabase = False
-                for line in lines:
-                    line_str = line.strip()
-                    if line_str == "[supabase]":
-                        in_supabase = True
-                        continue
-                    elif line_str.startswith("["):
-                        in_supabase = False
-                    if in_supabase and "=" in line_str:
-                        k, v = line_str.split("=", 1)
-                        sb_data[k.strip()] = v.strip().strip('"').strip("'")
-                if sb_data:
-                    url = sb_data.get("url", "")
-                    key = sb_data.get("key", "")
-                    if url and key and url != "YOUR_SUPABASE_URL" and key != "YOUR_SUPABASE_ANON_KEY":
-                        return {"url": url, "key": key}
-        except Exception:
-            pass
-            
+        pass
+    # 2. Manual fallback
+    toml_data = _load_toml_secrets()
+    if "telegram" in toml_data:
+        tg = toml_data["telegram"]
+        token = tg.get("bot_token", "")
+        cid = tg.get("chat_id", "")
+        if token and cid and token != "YOUR_BOT_TOKEN":
+            return {"bot_token": token, "chat_id": cid}
     return None
 
 DB_FILE = "nse_data.db"
@@ -339,9 +380,37 @@ with st.sidebar:
 
     st.header("📲 Telegram Bot Integration")
     st.markdown("Set up Telegram credentials to receive data directly in your chats on every update.")
-    bot_token = st.text_input("Bot API Token", type="password", help="Get this from @BotFather")
-    chat_id = st.text_input("Chat ID", help="The numeric ID of your chat or channel")
-    enable_telegram = st.checkbox("Enable Alerts on Refresh")
+    
+    # Load persisted credentials as defaults
+    _tg_saved = get_telegram_secrets() or {}
+    _saved_token = _tg_saved.get("bot_token", "")
+    _saved_chat_id = _tg_saved.get("chat_id", "")
+    
+    bot_token = st.text_input(
+        "Bot API Token",
+        value=_saved_token,
+        type="password",
+        help="Get this from @BotFather"
+    )
+    chat_id = st.text_input(
+        "Chat ID",
+        value=_saved_chat_id,
+        help="The numeric ID of your chat or channel"
+    )
+    enable_telegram = st.checkbox(
+        "Enable Alerts on Refresh",
+        value=bool(_saved_token and _saved_chat_id)
+    )
+    
+    if st.button("💾 Save Credentials", use_container_width=True):
+        if bot_token and chat_id:
+            ok = _save_toml_section("telegram", {"bot_token": bot_token, "chat_id": chat_id})
+            if ok:
+                st.success("✅ Credentials saved! They will auto-load on next launch.")
+            else:
+                st.error("❌ Failed to save. Check file permissions on secrets.toml.")
+        else:
+            st.warning("⚠️ Please enter both Bot Token and Chat ID before saving.")
     
     st.header("🗄️ Database Storage")
     # SQLite local DB (Always Active)
@@ -410,12 +479,25 @@ with col2:
 
 is_historical = selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
+# Auto-select 5 Min refresh when market is open (unless user has overridden)
+_market_open_now, _ = is_market_open()
+_timeframe_options = ["Manual", "3 Min", "5 Min", "15 Min"]
+if _market_open_now and not bypass_market_hours:
+    _default_tf_idx = _timeframe_options.index("5 Min")
+else:
+    _default_tf_idx = 0  # Manual when market closed
+
 with col3:
     if is_historical:
         hist_timeframe = st.selectbox("Historical Timeframe", ["All Data", "5 Min", "15 Min"])
         timeframe = "Manual" # Force manual for historical mode
     else:
-        timeframe = st.selectbox("Select Refresh Timeframe", ["Manual", "3 Min", "5 Min", "15 Min"])
+        timeframe = st.selectbox(
+            "Select Refresh Timeframe",
+            _timeframe_options,
+            index=_default_tf_idx,
+            help="Auto-set to 5 Min when market is open (9:15 AM – 3:30 PM IST)."
+        )
 
 # Pre-populate session state history from SQLite/Supabase for today's selected symbol
 if symbol not in st.session_state.history:
@@ -601,6 +683,7 @@ def get_nse_data(symbol):
                 total_pe_oi += row.get("putOption", {}).get("openInterest", 0)
                 
             # Normalize to match our original expected layout
+            # Also pass raw option_chains for per-strike volume analysis
             return {
                 "filtered": {
                     "CE": {"totOI": total_ce_oi},
@@ -608,7 +691,8 @@ def get_nse_data(symbol):
                 },
                 "records": {
                     "timestamp": "Live (Alternative Feed)"
-                }
+                },
+                "option_chains": option_chains  # per-strike rows for volume build-up
             }
         else:
             st.error(f"⚠️ Failed to fetch data. Status code: {response.status_code}")
@@ -617,6 +701,134 @@ def get_nse_data(symbol):
     except Exception as e:
         st.error(f"Error fetching data via alternative feed: {e}")
         return None
+
+
+def render_top_volume_buildup(option_chains):
+    """Render a side-by-side table of top 3 CE and PE strikes by trading volume."""
+    if not option_chains:
+        return
+
+    ce_rows = []
+    pe_rows = []
+
+    for row in option_chains:
+        strike = row.get("strikePrice", 0) / 100  # Convert paise → rupees
+
+        call = row.get("callOption", {})
+        ce_vol = call.get("volume", 0) or 0
+        ce_oi = call.get("openInterest", 0) or 0
+        ce_prev_oi = call.get("prevOpenInterest", 0) or 0
+        ce_ltp = call.get("ltp", 0) or 0
+        ce_rows.append({
+            "Strike": int(strike),
+            "Volume": ce_vol,
+            "OI": ce_oi,
+            "Chg in OI": ce_oi - ce_prev_oi,
+            "LTP": ce_ltp
+        })
+
+        put = row.get("putOption", {})
+        pe_vol = put.get("volume", 0) or 0
+        pe_oi = put.get("openInterest", 0) or 0
+        pe_prev_oi = put.get("prevOpenInterest", 0) or 0
+        pe_ltp = put.get("ltp", 0) or 0
+        pe_rows.append({
+            "Strike": int(strike),
+            "Volume": pe_vol,
+            "OI": pe_oi,
+            "Chg in OI": pe_oi - pe_prev_oi,
+            "LTP": pe_ltp
+        })
+
+    # Sort by volume descending and pick top 3
+    top_ce = sorted(ce_rows, key=lambda x: x["Volume"], reverse=True)[:3]
+    top_pe = sorted(pe_rows, key=lambda x: x["Volume"], reverse=True)[:3]
+
+    st.markdown("### 🔥 Top 3 Volume Build-up")
+    st.markdown(
+        """
+        <style>
+        .vol-table-wrap { border-radius: 10px; overflow: hidden; }
+        .vol-header-ce { background: linear-gradient(135deg,#7f1d1d,#b91c1c); color:#fff;
+                         padding:10px 14px; font-weight:700; font-size:1rem;
+                         border-radius:8px 8px 0 0; text-align:center; }
+        .vol-header-pe { background: linear-gradient(135deg,#14532d,#15803d); color:#fff;
+                         padding:10px 14px; font-weight:700; font-size:1rem;
+                         border-radius:8px 8px 0 0; text-align:center; }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    col_ce, col_pe = st.columns(2)
+
+    with col_ce:
+        st.markdown('<div class="vol-header-ce">📉 Top 3 CE Volume Build-up</div>', unsafe_allow_html=True)
+        if top_ce:
+            df_ce = pd.DataFrame(top_ce)
+            df_ce["Rank"] = ["🥇", "🥈", "🥉"]
+            df_ce = df_ce[["Rank", "Strike", "Volume", "OI", "Chg in OI", "LTP"]]
+
+            def style_ce_chg(val):
+                try:
+                    v = float(val)
+                    if v > 0:
+                        return "color: #FF4B4B; font-weight:bold"
+                    elif v < 0:
+                        return "color: #00C853; font-weight:bold"
+                except Exception:
+                    pass
+                return ""
+
+            styler_ce = df_ce.style\
+                .format({
+                    "Strike": "{:,}",
+                    "Volume": "{:,}",
+                    "OI": "{:,}",
+                    "Chg in OI": lambda x: f"+{int(x):,} 🔺" if x > 0 else (f"{int(x):,} 🔻" if x < 0 else "0 ⚪"),
+                    "LTP": "{:.2f}"
+                })
+            if hasattr(styler_ce, "map"):
+                styler_ce = styler_ce.map(style_ce_chg, subset=["Chg in OI"])
+            else:
+                styler_ce = styler_ce.applymap(style_ce_chg, subset=["Chg in OI"])
+            st.dataframe(styler_ce, use_container_width=True, hide_index=True)
+        else:
+            st.info("No CE volume data available.")
+
+    with col_pe:
+        st.markdown('<div class="vol-header-pe">📈 Top 3 PE Volume Build-up</div>', unsafe_allow_html=True)
+        if top_pe:
+            df_pe = pd.DataFrame(top_pe)
+            df_pe["Rank"] = ["🥇", "🥈", "🥉"]
+            df_pe = df_pe[["Rank", "Strike", "Volume", "OI", "Chg in OI", "LTP"]]
+
+            def style_pe_chg(val):
+                try:
+                    v = float(val)
+                    if v > 0:
+                        return "color: #00C853; font-weight:bold"
+                    elif v < 0:
+                        return "color: #FF4B4B; font-weight:bold"
+                except Exception:
+                    pass
+                return ""
+
+            styler_pe = df_pe.style\
+                .format({
+                    "Strike": "{:,}",
+                    "Volume": "{:,}",
+                    "OI": "{:,}",
+                    "Chg in OI": lambda x: f"+{int(x):,} 🔺" if x > 0 else (f"{int(x):,} 🔻" if x < 0 else "0 ⚪"),
+                    "LTP": "{:.2f}"
+                })
+            if hasattr(styler_pe, "map"):
+                styler_pe = styler_pe.map(style_pe_chg, subset=["Chg in OI"])
+            else:
+                styler_pe = styler_pe.applymap(style_pe_chg, subset=["Chg in OI"])
+            st.dataframe(styler_pe, use_container_width=True, hide_index=True)
+        else:
+            st.info("No PE volume data available.")
 
 # Placeholder for data
 data_placeholder = st.empty()
@@ -643,6 +855,7 @@ def render_data(bypass_market=False):
             total_ce_oi = data.get("filtered", {}).get("CE", {}).get("totOI", 0)
             total_pe_oi = data.get("filtered", {}).get("PE", {}).get("totOI", 0)
             timestamp = data.get("records", {}).get("timestamp", "Unknown")
+            option_chains_raw = data.get("option_chains", [])
             
             pcr = round(total_pe_oi / total_ce_oi, 4) if total_ce_oi > 0 else 0
             ist = ZoneInfo("Asia/Kolkata")
@@ -704,8 +917,10 @@ def render_data(bypass_market=False):
             st.session_state[f"sync_status_{symbol}"] = " | ".join(status_text)
             
             # --- Telegram Dispatch ---
-            if enable_telegram and bot_token and chat_id:
-                # Need to run formatting on current change just for the message
+            # Use sidebar input first; fall back to saved secrets
+            _effective_token = bot_token or (_tg_saved.get("bot_token", "") if "_tg_saved" in dir() else "")
+            _effective_chat_id = chat_id or (_tg_saved.get("chat_id", "") if "_tg_saved" in dir() else "")
+            if enable_telegram and _effective_token and _effective_chat_id:
                 ce_icon = '🟢' if ce_change_pct > 0 else '🔴' if ce_change_pct < 0 else '⚪'
                 pe_icon = '🟢' if pe_change_pct > 0 else '🔴' if pe_change_pct < 0 else '⚪'
                 msg = (
@@ -715,7 +930,7 @@ def render_data(bypass_market=False):
                     f"<b>Total PE OI:</b> {total_pe_oi:,} (<i>{round(pe_change_pct,2)}% {pe_icon}</i>)\n\n"
                     f"<b>PCR (PE/CE):</b> {pcr}"
                 )
-                send_telegram_alert(bot_token, chat_id, msg)
+                send_telegram_alert(_effective_token, _effective_chat_id, msg)
             
             # --- Rendering ---
             st.write(f"**Last Updated (NSE Server):** {timestamp}")
@@ -752,6 +967,11 @@ def render_data(bypass_market=False):
                 st.error(f"PCR is {pcr} (Bearish Bias - More Calls Sold than Puts)")
             else:
                 st.info(f"PCR is {pcr} (Neutral)")
+
+            # --- Top 3 Volume Build-up Table ---
+            render_top_volume_buildup(option_chains_raw)
+
+            st.markdown("---")
                 
             # Render History Table
             st.markdown("### 📊 Historical Data Updates")

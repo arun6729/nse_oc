@@ -553,6 +553,99 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         st.sidebar.error(f"Telegram Error: {e}")
 
+# Single Top 3 Volume Table Component for CE & PE Side with Position Change Highlighting
+def render_top_volume_buildup(option_chains, symbol):
+    if not option_chains:
+        return
+
+    ce_rows = []
+    pe_rows = []
+
+    for row in option_chains:
+        strike = int(row.get("strikePrice", 0) / 100)
+        call = row.get("callOption", {})
+        put = row.get("putOption", {})
+
+        ce_vol = call.get("volume", 0) or 0
+        ce_oi = call.get("openInterest", 0) or 0
+        ce_prev_oi = call.get("prevOpenInterest", 0) or 0
+        ce_ltp = call.get("ltp", 0) or 0
+
+        pe_vol = put.get("volume", 0) or 0
+        pe_oi = put.get("openInterest", 0) or 0
+        pe_prev_oi = put.get("prevOpenInterest", 0) or 0
+        pe_ltp = put.get("ltp", 0) or 0
+
+        ce_rows.append({"Strike": strike, "CE_Vol": ce_vol, "CE_OI": ce_oi, "CE_Chg_OI": ce_oi - ce_prev_oi, "CE_LTP": ce_ltp})
+        pe_rows.append({"Strike": strike, "PE_Vol": pe_vol, "PE_OI": pe_oi, "PE_Chg_OI": pe_oi - pe_prev_oi, "PE_LTP": pe_ltp})
+
+    top_ce = sorted(ce_rows, key=lambda x: x["CE_Vol"], reverse=True)[:3]
+    top_pe = sorted(pe_rows, key=lambda x: x["PE_Vol"], reverse=True)[:3]
+
+    curr_ce_strikes = [r["Strike"] for r in top_ce]
+    curr_pe_strikes = [r["Strike"] for r in top_pe]
+
+    prev_ce_key = f"prev_top_ce_{symbol}"
+    prev_pe_key = f"prev_top_pe_{symbol}"
+
+    prev_ce_strikes = st.session_state.get(prev_ce_key, curr_ce_strikes)
+    prev_pe_strikes = st.session_state.get(prev_pe_key, curr_pe_strikes)
+
+    combined_data = []
+    ranks = ["🥇 1st", "🥈 2nd", "🥉 3rd"]
+
+    for i in range(3):
+        ce_item = top_ce[i] if i < len(top_ce) else {}
+        pe_item = top_pe[i] if i < len(top_pe) else {}
+
+        ce_strike = ce_item.get("Strike", 0)
+        pe_strike = pe_item.get("Strike", 0)
+
+        ce_pos_status = "✨ NEW" if (prev_ce_strikes and ce_strike not in prev_ce_strikes) else "NO CHANGE"
+        pe_pos_status = "✨ NEW" if (prev_pe_strikes and pe_strike not in prev_pe_strikes) else "NO CHANGE"
+
+        combined_data.append({
+            "Rank": ranks[i],
+            "CE Strike": ce_strike,
+            "CE Volume": ce_item.get("CE_Vol", 0),
+            "CE Chg OI": ce_item.get("CE_Chg_OI", 0),
+            "CE Status": ce_pos_status,
+            "PE Strike": pe_strike,
+            "PE Volume": pe_item.get("PE_Vol", 0),
+            "PE Chg OI": pe_item.get("PE_Chg_OI", 0),
+            "PE Status": pe_pos_status
+        })
+
+    st.session_state[prev_ce_key] = curr_ce_strikes
+    st.session_state[prev_pe_key] = curr_pe_strikes
+
+    st.markdown("### 🔥 Top 3 Volume Build-up (CE & PE Combined)")
+    df_vol = pd.DataFrame(combined_data)
+
+    def style_vol_df(df_in):
+        styler = df_in.style
+
+        def highlight_status(val):
+            if "NEW" in str(val):
+                return "background-color: #FEF08A; color: #854D0E; font-weight: bold;"
+            return "color: #6B7280;"
+
+        if hasattr(styler, 'map'):
+            styler = styler.map(highlight_status, subset=["CE Status", "PE Status"])
+        else:
+            styler = styler.applymap(highlight_status, subset=["CE Status", "PE Status"])
+
+        return styler.format({
+            "CE Strike": "{:,}",
+            "CE Volume": "{:,}",
+            "CE Chg OI": lambda x: f"+{int(x):,} 🔺" if x > 0 else (f"{int(x):,} 🔻" if x < 0 else "0 ⚪"),
+            "PE Strike": "{:,}",
+            "PE Volume": "{:,}",
+            "PE Chg OI": lambda x: f"+{int(x):,} 🔺" if x > 0 else (f"{int(x):,} 🔻" if x < 0 else "0 ⚪")
+        })
+
+    st.dataframe(style_vol_df(df_vol), use_container_width=True, hide_index=True)
+
 # Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ App Settings")
@@ -714,7 +807,6 @@ def calculate_pcr_arrow(pcr_diff):
     else:
         return f"{'🔴' * num_arrows} {'↓' * num_arrows}"
 
-# Requirement 1 & 3: Renamed headers & Removed % CE / % PE Change columns
 def style_df(df):
     if df.empty:
         return df, pd.DataFrame()
@@ -722,10 +814,8 @@ def style_df(df):
     df_clean = df.copy()
     
     if "Total CE OI" in df_clean.columns and "Total PE OI" in df_clean.columns:
-        # Col D: Change in Total OI (formerly Difference col_A - Col_B)
         df_clean["Change in Total OI"] = df_clean["Total CE OI"] - df_clean["Total PE OI"]
         
-        # Col E: Strength % of Total OI
         def calc_total_strength(row):
             ce = row["Total CE OI"]
             pe = row["Total PE OI"]
@@ -736,16 +826,13 @@ def style_df(df):
             
         df_clean["Strengh % of total OI col_"] = df_clean.apply(calc_total_strength, axis=1)
 
-        # Col F & G: Change in CE OI & Change in PE OI
         if "Change in CE OI" not in df_clean.columns:
             df_clean["Change in CE OI"] = df_clean["Total CE OI"].diff().fillna(0).astype(int)
         if "Change in PE OI" not in df_clean.columns:
             df_clean["Change in PE OI"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
             
-        # Col H: Change in OI Trend (formerly Diff in col_E - Col_F)
         df_clean["Change in OI Trend"] = df_clean["Change in CE OI"] - df_clean["Change in PE OI"]
         
-        # Col I: Strength % of Change in OI
         def calc_change_strength(row):
             c_ce = abs(row["Change in CE OI"])
             c_pe = abs(row["Change in PE OI"])
@@ -756,14 +843,12 @@ def style_df(df):
             
         df_clean["Strengh % of change in OI"] = df_clean.apply(calc_change_strength, axis=1)
 
-    # Col J: PCR with Strength
     if "PCR" in df_clean.columns:
         pcr_diffs = df_clean["PCR"].diff().fillna(0)
         df_clean["PCR with Strength"] = df_clean.apply(
             lambda r: f"{r['PCR']:.2f} {calculate_pcr_arrow(pcr_diffs[r.name])}", axis=1
         )
 
-    # Detect Warning signs
     warnings = []
     for i in range(len(df_clean)):
         w_str = ""
@@ -792,7 +877,6 @@ def style_df(df):
         
     df_clean["Warning Signal"] = warnings
 
-    # Requirement 1: Removed % CE change & % PE change columns
     desired_cols = [
         'time', 
         'Total CE OI', 
@@ -860,7 +944,6 @@ def render_data(bypass_market=False):
                 styled_df, df_processed = style_df(df)
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
                 
-                # Requirement 2: Draw Line Charts for Total OI and Change in OI
                 if not df_processed.empty and len(df_processed) > 1 and "time" in df_processed.columns:
                     chart_df = df_processed.set_index("time")
                     st.markdown("---")
@@ -885,6 +968,7 @@ def render_data(bypass_market=False):
             pcr = round(total_pe_oi / total_ce_oi, 4) if total_ce_oi > 0 else 0
             max_pain = data.get("max_pain", 0.0)
             st.session_state[f"max_pain_{symbol}"] = max_pain
+            option_chains_raw = data.get("option_chains", [])
             
             ist = ZoneInfo("Asia/Kolkata")
             current_time = datetime.now(ist).strftime('%H:%M:%S')
@@ -919,12 +1003,15 @@ def render_data(bypass_market=False):
                 )
                 send_telegram_alert(_effective_token, _effective_chat_id, tg_msg)
             
+            # Single Top 3 Volume Build-up Table (CE & PE Combined with Position Change Highlighting)
+            render_top_volume_buildup(option_chains_raw, symbol)
+            st.markdown("---")
+
             st.markdown("### 📊 Trending OI Analysis Table")
             df = pd.DataFrame(symbol_history)
             styled_df, df_processed = style_df(df)
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-            # Requirement 2: Draw Line Charts for Total CE/PE OI and Change in CE/PE OI
             if not df_processed.empty and len(df_processed) > 1 and "time" in df_processed.columns:
                 chart_df = df_processed.set_index("time")
                 st.markdown("---")

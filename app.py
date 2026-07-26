@@ -148,9 +148,9 @@ def insert_to_sqlite(symbol, record):
             record.get("Time", ""),
             symbol,
             record.get("Total CE OI", 0),
-            record.get("% CE Change", 0.0),
+            0.0,
             record.get("Total PE OI", 0),
-            record.get("Total PE Change", 0.0) if "% PE Change" not in record else record.get("% PE Change", 0.0),
+            0.0,
             record.get("PCR", 0.0),
             record.get("Total CE OI", 0) - record.get("Total PE OI", 0)
         ))
@@ -187,9 +187,7 @@ def fetch_from_sqlite_historical(symbol, date_str):
                 "time": r["time"],
                 "symbol": r["symbol"],
                 "total_ce_oi": r["total_ce_oi"],
-                "ce_change_pct": r["ce_change_pct"],
                 "total_pe_oi": r["total_pe_oi"],
-                "pe_change_pct": r["pe_change_pct"],
                 "pcr": r["pcr"],
                 "diff_ce_pe": r["diff_ce_pe"]
             })
@@ -213,9 +211,9 @@ def insert_to_supabase(symbol, record):
             "time": record.get("Time", ""),
             "symbol": symbol.upper(),
             "total_ce_oi": record.get("Total CE OI", 0),
-            "ce_change_pct": record.get("% CE Change", 0),
+            "ce_change_pct": 0,
             "total_pe_oi": record.get("Total PE OI", 0),
-            "pe_change_pct": record.get("% PE Change", 0),
+            "pe_change_pct": 0,
             "pcr": record.get("PCR", 0),
             "diff_ce_pe": record.get("Total CE OI", 0) - record.get("Total PE OI", 0)
         }
@@ -261,7 +259,6 @@ def fetch_from_supabase_historical(symbol, date_str):
     except Exception:
         return None
 
-# --- Market Hours Auto Start/Stop Check ---
 def is_market_open():
     ist = ZoneInfo("Asia/Kolkata")
     now = datetime.now(ist)
@@ -325,9 +322,7 @@ def load_today_history(symbol, db_source="Auto (Supabase -> SQLite)"):
                     "Time": r.get("time", ""),
                     "Symbol": r.get("symbol", ""),
                     "Total CE OI": r.get("total_ce_oi", 0),
-                    "% CE Change": r.get("ce_change_pct", 0.0),
                     "Total PE OI": r.get("total_pe_oi", 0),
-                    "% PE Change": r.get("pe_change_pct", 0.0),
                     "PCR": r.get("pcr", 0.0)
                 })
         st.session_state.history[symbol] = session_history
@@ -486,7 +481,6 @@ def get_live_stock_quote(symbol_code):
         pass
     return {"ltp": 0.0, "chg": 0.0, "chg_pct": 0.0, "close": 0.0}
 
-# Requirement 6: Max Pain Calculation
 def calculate_max_pain(option_chains):
     """Calculate Max Pain strike from option chain rows."""
     if not option_chains:
@@ -612,7 +606,7 @@ with st.sidebar:
         index=0
     )
 
-# Requirement 3: Clean Header without 1Cliq branding badge
+# Header
 st.markdown("""
 <div class="brand-header">
     <div>
@@ -622,7 +616,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Top Bar Spot, Futures & Requirement 6: Max Pain Ticker Ribbon
+# Top Bar Spot, Futures & Max Pain Ticker Ribbon
 top_ticker_col1, top_ticker_col2 = st.columns([1.8, 2.2])
 
 with top_ticker_col1:
@@ -632,7 +626,6 @@ with top_ticker_col1:
     spot_chg = -102.15 if idx_spot_data['chg'] == 0 else (idx_spot_data['chg'] * 15)
     spot_chg_pct = (spot_chg / spot_val) * 100
     
-    # Calculate or retrieve current Max Pain
     live_max_pain = st.session_state.get(f"max_pain_{st.session_state.get('selected_symbol', 'NIFTY')}", 23900.0)
     
     chg_class = "ticker-negative" if spot_chg < 0 else "ticker-positive"
@@ -696,7 +689,6 @@ with fc3:
 with fc4:
     expiry_date = st.selectbox("Expiry Date", ["28-Jul-2026", "04-Aug-2026", "11-Aug-2026"])
 with fc5:
-    # Requirement 2: Added 15 min timeframe option
     timeframe = st.selectbox("Time Interval", ["3 min", "5 min", "10 min", "15 min", "30 min", "60 min", "Manual"], index=1)
 
 is_historical = (mode == "Historical") or (selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date())
@@ -722,28 +714,16 @@ def calculate_pcr_arrow(pcr_diff):
     else:
         return f"{'🔴' * num_arrows} {'↓' * num_arrows}"
 
-# Requirement 1 & Requirements 4, 5: Exact Excel Column Order (A to J) & Warnings
+# Requirement 1 & 3: Renamed headers & Removed % CE / % PE Change columns
 def style_df(df):
     if df.empty:
-        return df
+        return df, pd.DataFrame()
         
     df_clean = df.copy()
     
-    # Requirement 1: Calculate exact columns matching Excel layout (Cols A to J)
-    # Col A: time
-    # Col B: Total CE OI
-    # Col C: Total PE OI
-    # Col D: Difference col_A - Col_B (Total CE OI - Total PE OI)
-    # Col E: Strengh % of total OI
-    # Col F: Change in CE OI
-    # Col G: Change in PE OI
-    # Col H: Diff in col_E - Col_F (Change in CE OI - Change in PE OI)
-    # Col I: Strengh % of change in OI
-    # Col J: PCR with Strength
-    
     if "Total CE OI" in df_clean.columns and "Total PE OI" in df_clean.columns:
-        # Col D: Difference (Total CE OI - Total PE OI)
-        df_clean["Difference col_A - Col_B"] = df_clean["Total CE OI"] - df_clean["Total PE OI"]
+        # Col D: Change in Total OI (formerly Difference col_A - Col_B)
+        df_clean["Change in Total OI"] = df_clean["Total CE OI"] - df_clean["Total PE OI"]
         
         # Col E: Strength % of Total OI
         def calc_total_strength(row):
@@ -762,8 +742,8 @@ def style_df(df):
         if "Change in PE OI" not in df_clean.columns:
             df_clean["Change in PE OI"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
             
-        # Col H: Diff in col_E - Col_F (Change in CE OI - Change in PE OI)
-        df_clean["Diff in col_E - Col_F"] = df_clean["Change in CE OI"] - df_clean["Change in PE OI"]
+        # Col H: Change in OI Trend (formerly Diff in col_E - Col_F)
+        df_clean["Change in OI Trend"] = df_clean["Change in CE OI"] - df_clean["Change in PE OI"]
         
         # Col I: Strength % of Change in OI
         def calc_change_strength(row):
@@ -783,9 +763,7 @@ def style_df(df):
             lambda r: f"{r['PCR']:.2f} {calculate_pcr_arrow(pcr_diffs[r.name])}", axis=1
         )
 
-    # Requirements 4 & 5: Detect Warning signs for Divergences
-    # Warning for Change in OI: Rise in Change CE & Fall in Change PE (Bearish ⚠️) or vice versa (Bullish ⚠️)
-    # Warning for Total OI: Continuous Rise in Total CE & Fall in Total PE (Bearish 🚨) or vice versa (Bullish 🚨)
+    # Detect Warning signs
     warnings = []
     for i in range(len(df_clean)):
         w_str = ""
@@ -800,13 +778,11 @@ def style_df(df):
             curr_t_pe = df_clean.iloc[i]["Total PE OI"]
             prev_t_pe = df_clean.iloc[i-1]["Total PE OI"]
             
-            # Req 4: Warning for Change in OI divergence
             if curr_c_ce > prev_c_ce and curr_c_pe < prev_c_pe:
                 w_str += "⚠️ Bearish Chg Divergence "
             elif curr_c_pe > prev_c_pe and curr_c_ce < prev_c_ce:
                 w_str += "⚠️ Bullish Chg Divergence "
                 
-            # Req 5: Warning for Total OI divergence
             if curr_t_ce > prev_t_ce and curr_t_pe < prev_t_pe:
                 w_str += "🚨 Total CE Rising/PE Falling "
             elif curr_t_pe > prev_t_pe and curr_t_ce < prev_t_ce:
@@ -816,35 +792,33 @@ def style_df(df):
         
     df_clean["Warning Signal"] = warnings
 
-    # Map to exact requested column order: Cols A to J + Warning
+    # Requirement 1: Removed % CE change & % PE change columns
     desired_cols = [
-        'Time', 
+        'time', 
         'Total CE OI', 
         'Total PE OI', 
-        'Difference col_A - Col_B', 
+        'Change in Total OI', 
         'Strengh % of total OI col_', 
         'Change in CE OI', 
         'Change in PE OI', 
-        'Diff in col_E - Col_F', 
+        'Change in OI Trend', 
         'Strengh % of change in OI', 
         'PCR with Strength',
         'Warning Signal'
     ]
     
-    # Rename Time column to match lower 'time' in Excel if desired
-    df_clean = df_clean.rename(columns={"Time": "time"})
-    desired_cols[0] = "time"
+    if "Time" in df_clean.columns:
+        df_clean = df_clean.rename(columns={"Time": "time"})
     
     existing_cols = [c for c in desired_cols if c in df_clean.columns]
     for c in df_clean.columns:
-        if c not in existing_cols and c not in ['Symbol', 'date', 'datetime', 'PCR']:
+        if c not in existing_cols and c not in ['Symbol', 'date', 'datetime', 'PCR', '% CE Change', '% PE Change']:
             existing_cols.append(c)
             
     df_clean = df_clean[existing_cols]
 
     styler = df_clean.style
 
-    # Highlight Warning rows with soft amber/red highlights
     def row_style(row):
         styles = [''] * len(row)
         w_val = row.get("Warning Signal", "")
@@ -861,17 +835,17 @@ def style_df(df):
         format_dict["Total CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
     if "Total PE OI" in df_clean.columns:
         format_dict["Total PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Difference col_A - Col_B" in df_clean.columns:
-        format_dict["Difference col_A - Col_B"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Change in Total OI" in df_clean.columns:
+        format_dict["Change in Total OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
     if "Change in CE OI" in df_clean.columns:
         format_dict["Change in CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
     if "Change in PE OI" in df_clean.columns:
         format_dict["Change in PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Diff in col_E - Col_F" in df_clean.columns:
-        format_dict["Diff in col_E - Col_F"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Change in OI Trend" in df_clean.columns:
+        format_dict["Change in OI Trend"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
 
     styler = styler.format(format_dict)
-    return styler
+    return styler, df_clean
 
 data_placeholder = st.empty()
 
@@ -883,8 +857,22 @@ def render_data(bypass_market=False):
             if symbol in st.session_state.history and len(st.session_state.history[symbol]) > 0:
                 st.markdown("### 📊 Trending OI Table (Last Known State)")
                 df = pd.DataFrame(st.session_state.history[symbol])
-                styled_df = style_df(df)
+                styled_df, df_processed = style_df(df)
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                
+                # Requirement 2: Draw Line Charts for Total OI and Change in OI
+                if not df_processed.empty and len(df_processed) > 1 and "time" in df_processed.columns:
+                    chart_df = df_processed.set_index("time")
+                    st.markdown("---")
+                    c_col1, c_col2 = st.columns(2)
+                    with c_col1:
+                        st.markdown("### 📈 Total CE OI vs Total PE OI Trend")
+                        if "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
+                            st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=320)
+                    with c_col2:
+                        st.markdown("### 📊 Change in CE OI vs Change in PE OI Trend")
+                        if "Change in CE OI" in chart_df.columns and "Change in PE OI" in chart_df.columns:
+                            st.line_chart(chart_df[["Change in CE OI", "Change in PE OI"]], height=320)
         return
 
     with data_placeholder.container():
@@ -902,25 +890,12 @@ def render_data(bypass_market=False):
             current_time = datetime.now(ist).strftime('%H:%M:%S')
             
             symbol_history = st.session_state.history.get(symbol, [])
-            ce_change_pct = 0.0
-            pe_change_pct = 0.0
-            
-            if len(symbol_history) > 0:
-                last_record = symbol_history[-1]
-                last_ce = last_record.get("Total CE OI", 0)
-                last_pe = last_record.get("Total PE OI", 0)
-                if last_ce > 0:
-                    ce_change_pct = ((total_ce_oi - last_ce) / last_ce) * 100
-                if last_pe > 0:
-                    pe_change_pct = ((total_pe_oi - last_pe) / last_pe) * 100
 
             new_record = {
                 "Time": current_time,
                 "Symbol": symbol,
                 "Total CE OI": total_ce_oi,
-                "% CE Change": round(ce_change_pct, 2),
                 "Total PE OI": total_pe_oi,
-                "% PE Change": round(pe_change_pct, 2),
                 "PCR": pcr
             }
             symbol_history.append(new_record)
@@ -934,13 +909,11 @@ def render_data(bypass_market=False):
             _effective_chat_id = chat_id or _tg_secrets.get("chat_id")
             
             if enable_telegram and _effective_token and _effective_chat_id:
-                ce_icon = '🟢' if ce_change_pct > 0 else '🔴' if ce_change_pct < 0 else '⚪'
-                pe_icon = '🟢' if pe_change_pct > 0 else '🔴' if pe_change_pct < 0 else '⚪'
                 tg_msg = (
                     f"📈 <b>Trending OI Alert: {symbol}</b>\n"
                     f"🕒 Time: {current_time}\n\n"
-                    f"<b>Total CE OI:</b> {total_ce_oi:,} ({round(ce_change_pct,2)}% {ce_icon})\n"
-                    f"<b>Total PE OI:</b> {total_pe_oi:,} ({round(pe_change_pct,2)}% {pe_icon})\n"
+                    f"<b>Total CE OI:</b> {total_ce_oi:,}\n"
+                    f"<b>Total PE OI:</b> {total_pe_oi:,}\n"
                     f"<b>Max Pain:</b> {max_pain:,.0f}\n"
                     f"<b>PCR:</b> {pcr:.2f}"
                 )
@@ -948,8 +921,22 @@ def render_data(bypass_market=False):
             
             st.markdown("### 📊 Trending OI Analysis Table")
             df = pd.DataFrame(symbol_history)
-            styled_df = style_df(df)
+            styled_df, df_processed = style_df(df)
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            # Requirement 2: Draw Line Charts for Total CE/PE OI and Change in CE/PE OI
+            if not df_processed.empty and len(df_processed) > 1 and "time" in df_processed.columns:
+                chart_df = df_processed.set_index("time")
+                st.markdown("---")
+                c_col1, c_col2 = st.columns(2)
+                with c_col1:
+                    st.markdown("### 📈 Total CE OI vs Total PE OI Trend")
+                    if "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
+                        st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=320)
+                with c_col2:
+                    st.markdown("### 📊 Change in CE OI vs Change in PE OI Trend")
+                    if "Change in CE OI" in chart_df.columns and "Change in PE OI" in chart_df.columns:
+                        st.line_chart(chart_df[["Change in CE OI", "Change in PE OI"]], height=320)
 
 def render_historical_data(symbol, selected_date, db_source="Auto (Supabase -> SQLite)"):
     date_str = selected_date.strftime("%Y-%m-%d")
@@ -966,8 +953,21 @@ def render_historical_data(symbol, selected_date, db_source="Auto (Supabase -> S
         "pcr": "PCR"
     }
     df = df.rename(columns=rename_map)
-    styled_df = style_df(df)
+    styled_df, df_processed = style_df(df)
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+    if not df_processed.empty and len(df_processed) > 1 and "time" in df_processed.columns:
+        chart_df = df_processed.set_index("time")
+        st.markdown("---")
+        c_col1, c_col2 = st.columns(2)
+        with c_col1:
+            st.markdown("### 📈 Total CE OI vs Total PE OI Trend")
+            if "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
+                st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=320)
+        with c_col2:
+            st.markdown("### 📊 Change in CE OI vs Change in PE OI Trend")
+            if "Change in CE OI" in chart_df.columns and "Change in PE OI" in chart_df.columns:
+                st.line_chart(chart_df[["Change in CE OI", "Change in PE OI"]], height=320)
 
 if is_historical:
     render_historical_data(symbol, selected_date, db_source)

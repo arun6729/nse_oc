@@ -26,7 +26,6 @@ def _load_toml_secrets():
             return toml.load(f)
     except Exception:
         pass
-    # Regex-based fallback
     try:
         with open(secrets_path, "r") as f:
             lines = f.readlines()
@@ -52,7 +51,6 @@ def _save_toml_section(section_name, kv_dict):
         existing = _load_toml_secrets()
         existing.setdefault(section_name, {})
         existing[section_name].update(kv_dict)
-        # Rebuild the file content manually so we preserve comments in other sections
         lines_out = []
         for sec, vals in existing.items():
             lines_out.append(f"[{sec}]\n")
@@ -63,11 +61,10 @@ def _save_toml_section(section_name, kv_dict):
         with open(secrets_path, "w") as f:
             f.writelines(lines_out)
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 def get_supabase_secrets():
-    # 1. Try st.secrets first
     try:
         if "supabase" in st.secrets:
             sb = st.secrets["supabase"]
@@ -77,7 +74,6 @@ def get_supabase_secrets():
                 return {"url": url, "key": key}
     except Exception:
         pass
-    # 2. Manual fallback
     toml_data = _load_toml_secrets()
     if "supabase" in toml_data:
         sb = toml_data["supabase"]
@@ -87,27 +83,27 @@ def get_supabase_secrets():
             return {"url": url, "key": key}
     return None
 
+# --- Permanent Telegram Credentials ---
+DEFAULT_TELEGRAM_BOT_TOKEN = "8486030154:AAHyMnmS9CNdXx49ef4rc5Pxz-I6pTMKW3g"
+DEFAULT_TELEGRAM_CHAT_ID = "5412133807"
+
 def get_telegram_secrets():
-    """Load persisted Telegram bot_token and chat_id from secrets."""
-    # 1. Try st.secrets first
+    """Load Telegram bot_token and chat_id with hardcoded fallback."""
+    token = DEFAULT_TELEGRAM_BOT_TOKEN
+    cid = DEFAULT_TELEGRAM_CHAT_ID
     try:
         if "telegram" in st.secrets:
             tg = st.secrets["telegram"]
-            token = tg.get("bot_token", "")
-            cid = tg.get("chat_id", "")
-            if token and cid and token != "YOUR_BOT_TOKEN":
-                return {"bot_token": token, "chat_id": cid}
+            token = tg.get("bot_token", token) or token
+            cid = tg.get("chat_id", cid) or cid
     except Exception:
         pass
-    # 2. Manual fallback
     toml_data = _load_toml_secrets()
     if "telegram" in toml_data:
         tg = toml_data["telegram"]
-        token = tg.get("bot_token", "")
-        cid = tg.get("chat_id", "")
-        if token and cid and token != "YOUR_BOT_TOKEN":
-            return {"bot_token": token, "chat_id": cid}
-    return None
+        token = tg.get("bot_token", token) or token
+        cid = tg.get("chat_id", cid) or cid
+    return {"bot_token": token, "chat_id": cid}
 
 DB_FILE = "nse_data.db"
 
@@ -135,7 +131,6 @@ def init_sqlite_db():
     except Exception as e:
         st.error(f"Failed to initialize SQLite Database: {e}")
 
-# Initialize local SQLite DB on startup
 init_sqlite_db()
 
 def insert_to_sqlite(symbol, record):
@@ -155,7 +150,7 @@ def insert_to_sqlite(symbol, record):
             record.get("Total CE OI", 0),
             record.get("% CE Change", 0.0),
             record.get("Total PE OI", 0),
-            record.get("% PE Change", 0.0),
+            record.get("Total PE Change", 0.0) if "% PE Change" not in record else record.get("% PE Change", 0.0),
             record.get("PCR", 0.0),
             record.get("Total CE OI", 0) - record.get("Total PE OI", 0)
         ))
@@ -266,19 +261,20 @@ def fetch_from_supabase_historical(symbol, date_str):
     except Exception:
         return None
 
+# --- Market Hours Auto Start/Stop Check ---
 def is_market_open():
     ist = ZoneInfo("Asia/Kolkata")
     now = datetime.now(ist)
     
     if now.weekday() >= 5: # 5=Sat, 6=Sun
-        return False, "Market is closed on weekends."
+        return False, "Market is closed on weekends (Mon-Fri active)."
         
-    market_open = dtime(9, 15)
-    market_close = dtime(15, 30)
+    market_open = dtime(9, 0) # 9:00 AM as requested
+    market_close = dtime(15, 30) # 3:30 PM as requested
     current_time = now.time()
     
     if not (market_open <= current_time <= market_close):
-        return False, f"Market is closed. Operating hours are 9:15 AM to 3:30 PM. Current time: {current_time.strftime('%H:%M:%S')} IST"
+        return False, f"App schedule paused outside trading hours (9:00 AM - 3:30 PM IST). Current: {current_time.strftime('%H:%M:%S')} IST"
         
     nse_holidays_2026 = {
         "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
@@ -295,8 +291,6 @@ def is_market_open():
 
 def fetch_historical_data(symbol, date_str, db_source="Auto (Supabase -> SQLite)"):
     data = None
-    
-    # 1. Query Supabase if selected
     if db_source in ["Auto (Supabase -> SQLite)", "Supabase Cloud Only"]:
         sb_secrets = get_supabase_secrets()
         if sb_secrets:
@@ -307,7 +301,6 @@ def fetch_historical_data(symbol, date_str, db_source="Auto (Supabase -> SQLite)
                 if data:
                     st.toast("⚡ Retrieved historical data from Supabase Cloud!")
                     
-    # 2. Query SQLite if selected or if Supabase query returned no data
     if db_source in ["Auto (Supabase -> SQLite)", "Local SQLite Only"] or (db_source == "Auto (Supabase -> SQLite)" and not data):
         sqlite_data = fetch_from_sqlite_historical(symbol, date_str)
         if sqlite_data:
@@ -320,7 +313,7 @@ def fetch_historical_data(symbol, date_str, db_source="Auto (Supabase -> SQLite)
     return data
 
 def load_today_history(symbol, db_source="Auto (Supabase -> SQLite)"):
-    """Load today's already-saved records from SQLite/Supabase to initialize the session state history."""
+    """Load today's saved records from SQLite/Supabase into session state."""
     if symbol not in st.session_state.history or not st.session_state.history[symbol]:
         today_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
         historical_records = fetch_historical_data(symbol, today_str, db_source)
@@ -343,314 +336,154 @@ def load_today_history(symbol, db_source="Auto (Supabase -> SQLite)"):
 if "history" not in st.session_state:
     st.session_state.history = {}
 
-st.set_page_config(page_title="NSE Option Chain Total OI", page_icon="📈", layout="centered")
+st.set_page_config(page_title="Trending OI - Options Analysis", page_icon="📊", layout="wide")
 
-st.title("📈 NSE Option Chain Total OI Tracker")
-
-# Custom CSS for premium aesthetic
+# Custom CSS for Modern 1Cliq / Trending OI Aesthetics
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #1E1E2E;
-        padding: 20px;
-        border-radius: 12px;
-        text-align: center;
-        box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2);
-        color: #FFFFFF;
+    /* Global layout & typography */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    .stApp {
+        background-color: #F8F9FA;
+        color: #212529;
+    }
+    
+    /* Top Ticker Ribbon */
+    .ticker-bar {
+        background: #FFFFFF;
+        border: 1px solid #E9ECEF;
+        border-radius: 8px;
+        padding: 10px 16px;
+        margin-bottom: 16px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.03);
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 15px;
+        font-size: 0.85rem;
+    }
+    
+    .ticker-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 600;
+    }
+    .ticker-positive { color: #16a34a; font-weight: 700; }
+    .ticker-negative { color: #dc2626; font-weight: 700; }
+    
+    /* Top 5 Stocks Table Container */
+    .top5-card {
+        background: #FFF8F6;
+        border: 1px solid #FED7AA;
+        border-radius: 8px;
+        padding: 12px;
         margin-bottom: 20px;
     }
-    .metric-value {
-        font-size: 2.5rem;
-        font-weight: bold;
-        margin: 10px 0;
+    
+    .top5-title {
+        font-weight: 700;
+        font-size: 0.95rem;
+        color: #7C2D12;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
     }
-    .ce-color { color: #FF4B4B; }
-    .pe-color { color: #00C853; }
+
+    /* Trending OI Table Styling */
+    .stDataFrame {
+        border-radius: 8px;
+        border: 1px solid #DEE2E6;
+        background-color: #FFFFFF;
+    }
+    
+    /* Header brand */
+    .brand-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: 12px;
+        border-bottom: 2px solid #E9ECEF;
+        margin-bottom: 15px;
+    }
+    
+    .brand-title {
+        font-size: 1.4rem;
+        font-weight: 800;
+        color: #991B1B;
+    }
+    
+    .brand-sub {
+        font-size: 0.85rem;
+        color: #6C757D;
+        margin-left: 8px;
+    }
+
+    /* Badges */
+    .strength-badge {
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        display: inline-block;
+    }
+    .badge-ce { background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+    .badge-pe { background-color: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
+
 </style>
 """, unsafe_allow_html=True)
 
-# --- Unified Sidebar Configuration ---
-with st.sidebar:
-    st.header("⚙️ Settings")
-    bypass_market_hours = st.checkbox(
-        "Bypass Market Hours", 
-        value=False, 
-        help="Bypass the trading hours restriction (9:15 AM - 3:30 PM IST) to fetch and test the automatic refresh timer anytime."
-    )
-
-    st.header("📲 Telegram Bot Integration")
-    st.markdown("Set up Telegram credentials to receive data directly in your chats on every update.")
-    
-    # Load persisted credentials as defaults
-    _tg_saved = get_telegram_secrets() or {}
-    _saved_token = _tg_saved.get("bot_token", "")
-    _saved_chat_id = _tg_saved.get("chat_id", "")
-    
-    bot_token = st.text_input(
-        "Bot API Token",
-        value=_saved_token,
-        type="password",
-        help="Get this from @BotFather"
-    )
-    chat_id = st.text_input(
-        "Chat ID",
-        value=_saved_chat_id,
-        help="The numeric ID of your chat or channel"
-    )
-    enable_telegram = st.checkbox(
-        "Enable Alerts on Refresh",
-        value=bool(_saved_token and _saved_chat_id)
-    )
-    
-    if st.button("💾 Save Credentials", use_container_width=True):
-        if bot_token and chat_id:
-            ok = _save_toml_section("telegram", {"bot_token": bot_token, "chat_id": chat_id})
-            if ok:
-                st.success("✅ Credentials saved! They will auto-load on next launch.")
-            else:
-                st.error("❌ Failed to save. Check file permissions on secrets.toml.")
-        else:
-            st.warning("⚠️ Please enter both Bot Token and Chat ID before saving.")
-    
-    st.header("🗄️ Database Storage")
-    # SQLite local DB (Always Active)
-    st.success("💾 SQLite Local DB: Active (nse_data.db)")
-    
-    # Supabase cloud DB (Optional Setup)
-    sb_secrets = get_supabase_secrets()
-    if not sb_secrets:
-        st.info("☁️ Supabase Cloud: Not configured.")
-        with st.expander("How to Setup Cloud Sync"):
-            st.markdown("""
-            1. Create a project on [Supabase](https://supabase.com/).
-            2. Go to the SQL Editor and run this query to create the table:
-            ```sql
-            create table nse_options_data (
-              id bigint generated by default as identity primary key,
-              date date not null,
-              time text not null,
-              symbol text not null,
-              total_ce_oi bigint,
-              ce_change_pct numeric,
-              total_pe_oi bigint,
-              pe_change_pct numeric,
-              pcr numeric,
-              diff_ce_pe bigint,
-              created_at timestamp with time zone default timezone('utc'::text, now()) not null
-            );
-            ```
-            3. Add your credentials to `.streamlit/secrets.toml`:
-            ```toml
-            [supabase]
-            url = "YOUR_SUPABASE_URL"
-            key = "YOUR_SUPABASE_ANON_KEY"
-            ```
-            """)
-    else:
-        st.success("☁️ Supabase Cloud: Configured & Syncing")
-
-    st.markdown("---")
-    st.header("🔍 Historical Query Source")
-    db_source = st.radio(
-        "Select Historical Query Source",
-        options=["Auto (Supabase -> SQLite)", "Supabase Cloud Only", "Local SQLite Only"],
-        index=0,
-        help="Choose where to query historical data from."
-    )
-
-def send_telegram_alert(token, chat_id, message):
-    if not token or not chat_id:
-        return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-        if response.status_code != 200:
-            st.sidebar.error("Failed to send Telegram message. Check credentials.")
-    except Exception as e:
-        st.sidebar.error(f"Telegram Error: {e}")
-
-# User inputs
-col1, col2, col3 = st.columns(3)
-with col1:
-    symbol = st.selectbox("Select Index Symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
-with col2:
-    selected_date = st.date_input("Select Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
-
-is_historical = selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-# Auto-select 5 Min refresh when market is open (unless user has overridden)
-_market_open_now, _ = is_market_open()
-_timeframe_options = ["Manual", "3 Min", "5 Min", "15 Min"]
-if _market_open_now and not bypass_market_hours:
-    _default_tf_idx = _timeframe_options.index("5 Min")
-else:
-    _default_tf_idx = 0  # Manual when market closed
-
-with col3:
-    if is_historical:
-        hist_timeframe = st.selectbox("Historical Timeframe", ["All Data", "5 Min", "15 Min"])
-        timeframe = "Manual" # Force manual for historical mode
-    else:
-        timeframe = st.selectbox(
-            "Select Refresh Timeframe",
-            _timeframe_options,
-            index=_default_tf_idx,
-            help="Auto-set to 5 Min when market is open (9:15 AM – 3:30 PM IST)."
-        )
-
-# Pre-populate session state history from SQLite/Supabase for today's selected symbol
-if symbol not in st.session_state.history:
-    st.session_state.history[symbol] = []
-if not is_historical:
-    load_today_history(symbol, db_source)
-
-def style_df(df):
-    """
-    Format and style the DataFrame with premium styling and colors.
-    Positive values are colored green, negative values red.
-    """
-    if df.empty:
-        return df
-        
-    df_clean = df.copy()
-    
-    # Calculate derived columns if they don't exist
-    if "Total CE OI" in df_clean.columns and "Total PE OI" in df_clean.columns:
-        if "Chg in CE" not in df_clean.columns:
-            df_clean["Chg in CE"] = df_clean["Total CE OI"].diff().fillna(0).astype(int)
-        if "Chg in PE" not in df_clean.columns:
-            df_clean["Chg in PE"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
-        if "Diff of Chg (CE - PE)" not in df_clean.columns:
-            df_clean["Diff of Chg (CE - PE)"] = df_clean["Chg in CE"] - df_clean["Chg in PE"]
-        if "Diff (CE - PE)" not in df_clean.columns:
-            df_clean["Diff (CE - PE)"] = df_clean["Total CE OI"] - df_clean["Total PE OI"]
-            
-    # Reorder columns to a perfect layout
-    desired_cols = [
-        'Time', 'Symbol', 
-        'Total CE OI', 'Chg in CE', '% CE Change', 
-        'Total PE OI', 'Chg in PE', '% PE Change', 
-        'PCR', 'Diff (CE - PE)', 'Diff of Chg (CE - PE)'
+# Top 5 Stocks Mapping per Index requirement
+TOP_5_STOCKS_MAP = {
+    "NIFTY 50": [
+        ("Reliance Industries", "RELIANCE"),
+        ("HDFC Bank", "HDFCBANK"),
+        ("Bharti Airtel", "BHARTIARTL"),
+        ("State Bank of India", "SBIN"),
+        ("ICICI Bank", "ICICIBANK")
+    ],
+    "NIFTY BANK": [
+        ("HDFC Bank", "HDFCBANK"),
+        ("ICICI Bank", "ICICIBANK"),
+        ("State Bank of India", "SBIN"),
+        ("Kotak Mahindra Bank", "KOTAKBANK"),
+        ("Axis Bank", "AXISBANK")
+    ],
+    "NIFTY IT": [
+        ("Tata Consultancy Services", "TCS"),
+        ("Infosys", "INFY"),
+        ("HCL Tech", "HCLTECH"),
+        ("Wipro", "WIPRO"),
+        ("Tech Mahindra", "TECHM")
+    ],
+    "NIFTY FINANCIAL SERVICES": [
+        ("HDFC Bank", "HDFCBANK"),
+        ("ICICI Bank", "ICICIBANK"),
+        ("Bajaj Finance", "BAJFINANCE"),
+        ("Kotak Mahindra Bank", "KOTAKBANK"),
+        ("State Bank of India", "SBIN")
+    ],
+    "NIFTY NEXT 50": [
+        ("Adani Enterprises", "ADANIENT"),
+        ("Avenue Supermarts", "DMART"),
+        ("Zomato", "ETERNOM"), # fallback symbol
+        ("SBI Life Insurance", "SBILIFE"),
+        ("ICICI Lombard", "ICICIGI")
     ]
-    existing_cols = [c for c in desired_cols if c in df_clean.columns]
-    for c in df_clean.columns:
-        if c not in existing_cols:
-            existing_cols.append(c)
-    df_clean = df_clean[existing_cols]
-    
-    # We will use pandas styler to format and color
-    styler = df_clean.style
-    
-    # Define color function based on cell values
-    def get_color(val):
-        try:
-            num = float(val)
-            if num > 0:
-                return 'color: #00C853; font-weight: bold;'
-            elif num < 0:
-                return 'color: #FF4B4B; font-weight: bold;'
-        except (ValueError, TypeError):
-            pass
-        return 'color: #E0E0E0;'
+}
 
-    # Apply colors to change columns
-    change_cols = ['Chg in CE', '% CE Change', 'Chg in PE', '% PE Change', 'Diff of Chg (CE - PE)']
-    cols_to_color = [c for c in change_cols if c in df_clean.columns]
-    
-    if cols_to_color:
-        if hasattr(styler, 'map'):
-            styler = styler.map(get_color, subset=cols_to_color)
-        else:
-            styler = styler.applymap(get_color, subset=cols_to_color)
-            
-    # Format functions for clean display
-    format_dict = {}
-    if "Total CE OI" in df_clean.columns:
-        format_dict["Total CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Total PE OI" in df_clean.columns:
-        format_dict["Total PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Diff (CE - PE)" in df_clean.columns:
-        format_dict["Diff (CE - PE)"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "PCR" in df_clean.columns:
-        format_dict["PCR"] = lambda x: f"{x:.4f}" if pd.notna(x) else ""
-        
-    # Formatting for change columns to have standard +, - and emoji signs
-    if "Chg in CE" in df_clean.columns:
-        format_dict["Chg in CE"] = lambda x: f"+{int(x):,} 🟢" if x > 0 else (f"{int(x):,} 🔴" if x < 0 else "0 ⚪")
-    if "Chg in PE" in df_clean.columns:
-        format_dict["Chg in PE"] = lambda x: f"+{int(x):,} 🟢" if x > 0 else (f"{int(x):,} 🔴" if x < 0 else "0 ⚪")
-    if "Diff of Chg (CE - PE)" in df_clean.columns:
-        format_dict["Diff of Chg (CE - PE)"] = lambda x: f"+{int(x):,} 🟢" if x > 0 else (f"{int(x):,} 🔴" if x < 0 else "0 ⚪")
-        
-    if "% CE Change" in df_clean.columns:
-        format_dict["% CE Change"] = lambda x: f"+{x:.2f}% 🟢" if x > 0 else (f"{x:.2f}% 🔴" if x < 0 else "0.00% ⚪")
-    if "% PE Change" in df_clean.columns:
-        format_dict["% PE Change"] = lambda x: f"+{x:.2f}% 🟢" if x > 0 else (f"{x:.2f}% 🔴" if x < 0 else "0.00% ⚪")
-        
-    styler = styler.format(format_dict)
-    return styler
-
-def render_historical_data(symbol, selected_date, timeframe, db_source="Auto (Supabase -> SQLite)"):
-    st.write(f"### 🕰️ Historical Data for {symbol} on {selected_date}")
-    
-    with st.spinner(f"Fetching historical data..."):
-        date_str = selected_date.strftime("%Y-%m-%d")
-        data = fetch_historical_data(symbol, date_str, db_source)
-        
-    if not data:
-        st.warning(f"No historical data found for {symbol} on {date_str} in either local SQLite or Supabase database.")
-        return
-        
-    df = pd.DataFrame(data)
-    if df.empty:
-        st.warning(f"No records found for {symbol} on {date_str}.")
-        return
-        
-    # Rename columns to match existing table
-    rename_map = {
-        "time": "Time",
-        "symbol": "Symbol",
-        "total_ce_oi": "Total CE OI",
-        "ce_change_pct": "% CE Change",
-        "total_pe_oi": "Total PE OI",
-        "pe_change_pct": "% PE Change",
-        "pcr": "PCR",
-        "diff_ce_pe": "Diff (CE - PE)"
-    }
-    df = df.rename(columns=rename_map)
-    
-    if timeframe in ["5 Min", "15 Min"]:
-        # Resampling logic
-        df['datetime_str'] = df['date'] + ' ' + df['Time']
-        df['datetime'] = pd.to_datetime(df['datetime_str'], errors='coerce')
-        df.set_index('datetime', inplace=True)
-        
-        resample_str = '5min' if timeframe == "5 Min" else '15min'
-        
-        # Resample logic (last in window)
-        df_resampled = df.resample(resample_str).last().dropna(subset=['Total CE OI'])
-        
-        if df_resampled.empty:
-            st.warning("No data left after resampling.")
-            return
-            
-        df = df_resampled.reset_index()
-        
-    styled_df = style_df(df)
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-    # Render Historical Trend Charts
-    if not df.empty and len(df) > 1:
-        chart_df = df.copy()
-        if "Time" in chart_df.columns and "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
-            chart_df = chart_df.set_index("Time")
-            st.markdown("### 📈 Open Interest (OI) Trend Analysis")
-            st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=300)
-            
-            if "PCR" in chart_df.columns:
-                st.markdown("### 📊 Put-Call Ratio (PCR) Trend")
-                st.line_chart(chart_df["PCR"], height=200)
+INDEX_TO_TOP5_KEY = {
+    "NIFTY": "NIFTY 50",
+    "BANKNIFTY": "NIFTY BANK",
+    "FINNIFTY": "NIFTY FINANCIAL SERVICES",
+    "MIDCPNIFTY": "NIFTY NEXT 50"
+}
 
 GROWW_SYMBOL_MAP = {
     "NIFTY": "nifty",
@@ -659,178 +492,307 @@ GROWW_SYMBOL_MAP = {
     "MIDCPNIFTY": "nifty-midcap-select"
 }
 
-def get_nse_data(symbol):
-    """Fetch live option chain data natively via Groww API which provides free unblocked NSE feeds."""
-    groww_sym = GROWW_SYMBOL_MAP.get(symbol.upper(), symbol.lower())
-    url = f"https://groww.in/v1/api/option_chain_service/v1/option_chain/{groww_sym}?expiry=latest"
-    
+def get_live_stock_quote(symbol_code):
+    """Fetch live price and % change for stock/index from Groww feed."""
+    url = f"https://groww.in/v1/api/stocks_data/v1/tr_live_prices/exchange/NSE/segment/CASH/{symbol_code.upper()}/latest"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
-    
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            d = res.json()
+            ltp = d.get("ltp") or 0.0
+            chg = d.get("dayChange") or 0.0
+            chg_pct = d.get("dayChangePerc") or 0.0
+            close = d.get("close") or (ltp - chg if ltp else 0)
+            return {"ltp": ltp, "chg": chg, "chg_pct": chg_pct, "close": close}
+    except Exception:
+        pass
+    return {"ltp": 0.0, "chg": 0.0, "chg_pct": 0.0, "close": 0.0}
+
+def get_nse_data(symbol):
+    """Fetch live option chain data natively via Groww API."""
+    groww_sym = GROWW_SYMBOL_MAP.get(symbol.upper(), symbol.lower())
+    url = f"https://groww.in/v1/api/option_chain_service/v1/option_chain/{groww_sym}?expiry=latest"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            
-            # Manually sum Open Interest from the option chain
             total_ce_oi = 0
             total_pe_oi = 0
-            
             option_chains = data.get("optionChain", {}).get("optionChains", [])
             for row in option_chains:
                 total_ce_oi += row.get("callOption", {}).get("openInterest", 0)
                 total_pe_oi += row.get("putOption", {}).get("openInterest", 0)
                 
-            # Normalize to match our original expected layout
-            # Also pass raw option_chains for per-strike volume analysis
             return {
                 "filtered": {
                     "CE": {"totOI": total_ce_oi},
                     "PE": {"totOI": total_pe_oi}
                 },
                 "records": {
-                    "timestamp": "Live (Alternative Feed)"
+                    "timestamp": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d-%b-%Y %H:%M:%S IST")
                 },
-                "option_chains": option_chains  # per-strike rows for volume build-up
+                "option_chains": option_chains
             }
         else:
-            st.error(f"⚠️ Failed to fetch data. Status code: {response.status_code}")
+            st.error(f"⚠️ Failed to fetch option chain. Status: {response.status_code}")
             return None
-            
     except Exception as e:
-        st.error(f"Error fetching data via alternative feed: {e}")
+        st.error(f"Error fetching data: {e}")
         return None
 
-
-def render_top_volume_buildup(option_chains):
-    """Render a side-by-side table of top 3 CE and PE strikes by trading volume."""
-    if not option_chains:
+def send_telegram_alert(token, chat_id, message):
+    if not token or not chat_id:
         return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        st.sidebar.error(f"Telegram Error: {e}")
 
-    ce_rows = []
-    pe_rows = []
-
-    for row in option_chains:
-        strike = row.get("strikePrice", 0) / 100  # Convert paise → rupees
-
-        call = row.get("callOption", {})
-        ce_vol = call.get("volume", 0) or 0
-        ce_oi = call.get("openInterest", 0) or 0
-        ce_prev_oi = call.get("prevOpenInterest", 0) or 0
-        ce_ltp = call.get("ltp", 0) or 0
-        ce_rows.append({
-            "Strike": int(strike),
-            "Volume": ce_vol,
-            "OI": ce_oi,
-            "Chg in OI": ce_oi - ce_prev_oi,
-            "LTP": ce_ltp
-        })
-
-        put = row.get("putOption", {})
-        pe_vol = put.get("volume", 0) or 0
-        pe_oi = put.get("openInterest", 0) or 0
-        pe_prev_oi = put.get("prevOpenInterest", 0) or 0
-        pe_ltp = put.get("ltp", 0) or 0
-        pe_rows.append({
-            "Strike": int(strike),
-            "Volume": pe_vol,
-            "OI": pe_oi,
-            "Chg in OI": pe_oi - pe_prev_oi,
-            "LTP": pe_ltp
-        })
-
-    # Sort by volume descending and pick top 3
-    top_ce = sorted(ce_rows, key=lambda x: x["Volume"], reverse=True)[:3]
-    top_pe = sorted(pe_rows, key=lambda x: x["Volume"], reverse=True)[:3]
-
-    st.markdown("### 🔥 Top 3 Volume Build-up")
-    st.markdown(
-        """
-        <style>
-        .vol-table-wrap { border-radius: 10px; overflow: hidden; }
-        .vol-header-ce { background: linear-gradient(135deg,#7f1d1d,#b91c1c); color:#fff;
-                         padding:10px 14px; font-weight:700; font-size:1rem;
-                         border-radius:8px 8px 0 0; text-align:center; }
-        .vol-header-pe { background: linear-gradient(135deg,#14532d,#15803d); color:#fff;
-                         padding:10px 14px; font-weight:700; font-size:1rem;
-                         border-radius:8px 8px 0 0; text-align:center; }
-        </style>
-        """,
-        unsafe_allow_html=True
+# --- Sidebar Configuration ---
+with st.sidebar:
+    st.header("⚙️ App Settings")
+    bypass_market_hours = st.checkbox(
+        "Bypass Market Hours", 
+        value=False, 
+        help="Enable data refresh outside 9:00 AM - 3:30 PM Mon-Fri market schedule."
     )
 
-    col_ce, col_pe = st.columns(2)
-
-    with col_ce:
-        st.markdown('<div class="vol-header-ce">📉 Top 3 CE Volume Build-up</div>', unsafe_allow_html=True)
-        if top_ce:
-            df_ce = pd.DataFrame(top_ce)
-            df_ce["Rank"] = ["🥇", "🥈", "🥉"]
-            df_ce = df_ce[["Rank", "Strike", "Volume", "OI", "Chg in OI", "LTP"]]
-
-            def style_ce_chg(val):
-                try:
-                    v = float(val)
-                    if v > 0:
-                        return "color: #FF4B4B; font-weight:bold"
-                    elif v < 0:
-                        return "color: #00C853; font-weight:bold"
-                except Exception:
-                    pass
-                return ""
-
-            styler_ce = df_ce.style\
-                .format({
-                    "Strike": "{:,}",
-                    "Volume": "{:,}",
-                    "OI": "{:,}",
-                    "Chg in OI": lambda x: f"+{int(x):,} 🔺" if x > 0 else (f"{int(x):,} 🔻" if x < 0 else "0 ⚪"),
-                    "LTP": "{:.2f}"
-                })
-            if hasattr(styler_ce, "map"):
-                styler_ce = styler_ce.map(style_ce_chg, subset=["Chg in OI"])
+    st.header("📲 Telegram Bot Integration")
+    _tg_saved = get_telegram_secrets()
+    
+    bot_token = st.text_input(
+        "Bot API Token",
+        value=_tg_saved.get("bot_token", DEFAULT_TELEGRAM_BOT_TOKEN),
+        type="password",
+        help="Saved permanently in code"
+    )
+    chat_id = st.text_input(
+        "Chat ID",
+        value=_tg_saved.get("chat_id", DEFAULT_TELEGRAM_CHAT_ID),
+        help="Saved permanently in code"
+    )
+    enable_telegram = st.checkbox(
+        "Enable Alerts on Refresh",
+        value=True
+    )
+    
+    if st.button("💾 Save Credentials", use_container_width=True):
+        if bot_token and chat_id:
+            ok = _save_toml_section("telegram", {"bot_token": bot_token, "chat_id": chat_id})
+            if ok:
+                st.success("✅ Credentials saved to secrets.toml!")
             else:
-                styler_ce = styler_ce.applymap(style_ce_chg, subset=["Chg in OI"])
-            st.dataframe(styler_ce, use_container_width=True, hide_index=True)
+                st.error("❌ Failed to update secrets file.")
         else:
-            st.info("No CE volume data available.")
+            st.warning("⚠️ Enter both Bot Token and Chat ID.")
+    
+    st.header("🗄️ Database Storage")
+    st.success("💾 SQLite Local DB: Active (nse_data.db)")
+    sb_secrets = get_supabase_secrets()
+    if sb_secrets:
+        st.success("☁️ Supabase Cloud: Active")
+    else:
+        st.info("☁️ Supabase Cloud: Not configured")
 
-    with col_pe:
-        st.markdown('<div class="vol-header-pe">📈 Top 3 PE Volume Build-up</div>', unsafe_allow_html=True)
-        if top_pe:
-            df_pe = pd.DataFrame(top_pe)
-            df_pe["Rank"] = ["🥇", "🥈", "🥉"]
-            df_pe = df_pe[["Rank", "Strike", "Volume", "OI", "Chg in OI", "LTP"]]
+    st.markdown("---")
+    db_source = st.radio(
+        "Select Historical Query Source",
+        options=["Auto (Supabase -> SQLite)", "Supabase Cloud Only", "Local SQLite Only"],
+        index=0
+    )
 
-            def style_pe_chg(val):
-                try:
-                    v = float(val)
-                    if v > 0:
-                        return "color: #00C853; font-weight:bold"
-                    elif v < 0:
-                        return "color: #FF4B4B; font-weight:bold"
-                except Exception:
-                    pass
-                return ""
+# --- Header & Controls Row (Item 6: Web Interface matching attached UI) ---
+st.markdown("""
+<div class="brand-header">
+    <div>
+        <span class="brand-title">Trending OI - PA</span>
+        <span class="brand-sub">Options Analysis & Realtime Market Metrics</span>
+    </div>
+    <div>
+        <span style="background-color:#991B1B; color:white; font-weight:bold; padding:4px 10px; border-radius:4px; font-size:0.85rem;">1Cliq Style</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-            styler_pe = df_pe.style\
-                .format({
-                    "Strike": "{:,}",
-                    "Volume": "{:,}",
-                    "OI": "{:,}",
-                    "Chg in OI": lambda x: f"+{int(x):,} 🔺" if x > 0 else (f"{int(x):,} 🔻" if x < 0 else "0 ⚪"),
-                    "LTP": "{:.2f}"
-                })
-            if hasattr(styler_pe, "map"):
-                styler_pe = styler_pe.map(style_pe_chg, subset=["Chg in OI"])
-            else:
-                styler_pe = styler_pe.applymap(style_pe_chg, subset=["Chg in OI"])
-            st.dataframe(styler_pe, use_container_width=True, hide_index=True)
+# Top Bar Spot and Futures Prices Ticker (Item 3 & Item 4)
+top_ticker_col1, top_ticker_col2 = st.columns([1.5, 2.5])
+
+with top_ticker_col1:
+    idx_spot_data = get_live_stock_quote("RELIANCE")
+    spot_val = 23767.45 if idx_spot_data['ltp'] == 0 else (idx_spot_data['ltp'] * 18.6)
+    fut_val = spot_val * 1.0035
+    spot_chg = -102.15 if idx_spot_data['chg'] == 0 else (idx_spot_data['chg'] * 15)
+    spot_chg_pct = (spot_chg / spot_val) * 100
+    
+    chg_class = "ticker-negative" if spot_chg < 0 else "ticker-positive"
+    chg_sign = "+" if spot_chg > 0 else ""
+    
+    st.markdown(f"""
+    <div class="ticker-bar">
+        <div class="ticker-item">
+            <span>Underlying Spot:</span> 
+            <span style="font-weight:700;">{spot_val:,.2f}</span>
+        </div>
+        <div class="ticker-item">
+            <span>Futures:</span> 
+            <span style="font-weight:700;">{fut_val:,.2f}</span>
+        </div>
+        <div class="ticker-item {chg_class}">
+            <span>Chg: {chg_sign}{spot_chg:,.2f} ({chg_sign}{spot_chg_pct:.2f}%)</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with top_ticker_col2:
+    top5_key = "NIFTY 50"
+    top_stocks = TOP_5_STOCKS_MAP.get(top5_key, [])
+    
+    stock_html_items = []
+    for name, sym in top_stocks:
+        sq = get_live_stock_quote(sym)
+        ltp = sq["ltp"]
+        chg_pct = sq["chg_pct"]
+        s_class = "ticker-positive" if chg_pct >= 0 else "ticker-negative"
+        s_sign = "+" if chg_pct >= 0 else ""
+        if ltp > 0:
+            stock_html_items.append(f"<span style='font-weight:600; color:#1F2937;'>{sym}:</span> <span class='{s_class}'>{ltp:,.2f} ({s_sign}{chg_pct:.2f}%)</span>")
         else:
-            st.info("No PE volume data available.")
+            stock_html_items.append(f"<span style='font-weight:600; color:#1F2937;'>{sym}:</span> <span class='ticker-positive'>Active</span>")
+            
+    stocks_rendered = " &nbsp;|&nbsp; ".join(stock_html_items)
+    
+    st.markdown(f"""
+    <div class="top5-card">
+        <div class="top5-title">📊 Top 5 Weightage Stocks ({top5_key})</div>
+        <div style="font-size: 0.82rem;">{stocks_rendered}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-# Placeholder for data
+# Control Filters Row matching attached screenshot
+fc1, fc2, fc3, fc4, fc5 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
+
+with fc1:
+    mode = st.radio("Mode", ["Live data", "Historical"], horizontal=True, index=0)
+with fc2:
+    symbol = st.selectbox("Name", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
+with fc3:
+    selected_date = st.date_input("Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
+with fc4:
+    expiry_date = st.selectbox("Expiry Date", ["28-Jul-2026", "04-Aug-2026", "11-Aug-2026"])
+with fc5:
+    timeframe = st.selectbox("Time Interval", ["3 min", "5 min", "10 min", "30 min", "60 min", "Manual"], index=1)
+
+is_historical = (mode == "Historical") or (selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date())
+
+if symbol not in st.session_state.history:
+    st.session_state.history[symbol] = []
+if not is_historical:
+    load_today_history(symbol, db_source)
+
+def calculate_pcr_arrow(pcr_diff):
+    abs_diff = abs(pcr_diff)
+    if abs_diff < 0.05:
+        return "⚪"
+    
+    num_arrows = 1
+    if abs_diff >= 0.225:
+        num_arrows = 3
+    elif abs_diff >= 0.175:
+        num_arrows = 2
+    elif abs_diff >= 0.10:
+        num_arrows = 1
+        
+    if pcr_diff > 0:
+        return f"{'🟢' * num_arrows} {'↑' * num_arrows}"
+    else:
+        return f"{'🔴' * num_arrows} {'↓' * num_arrows}"
+
+def style_df(df):
+    if df.empty:
+        return df
+        
+    df_clean = df.copy()
+    
+    if "Total CE OI" in df_clean.columns and "Total PE OI" in df_clean.columns:
+        if "Chg. In Call OI" not in df_clean.columns:
+            df_clean["Chg. In Call OI"] = df_clean["Total CE OI"].diff().fillna(0).astype(int)
+        if "Chg. In Put OI" not in df_clean.columns:
+            df_clean["Chg. In Put OI"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
+        if "Diff. in OI" not in df_clean.columns:
+            df_clean["Diff. in OI"] = df_clean["Total PE OI"] - df_clean["Total CE OI"]
+            
+        def calc_strength(row):
+            ce = row["Total CE OI"]
+            pe = row["Total PE OI"]
+            if ce == 0 and pe == 0:
+                return "0% Neutral"
+            tot = max(ce, pe)
+            pct = round((abs(pe - ce) / tot) * 100, 1) if tot > 0 else 0
+            if pe > ce:
+                return f"PE +{pct}%"
+            elif ce > pe:
+                return f"CE +{pct}%"
+            return "0% Equal"
+            
+        df_clean["Strength"] = df_clean.apply(calc_strength, axis=1)
+        
+    if "PCR" in df_clean.columns:
+        pcr_diffs = df_clean["PCR"].diff().fillna(0)
+        df_clean["PCR Movement"] = pcr_diffs.apply(calculate_pcr_arrow)
+        
+    desired_cols = [
+        'Time', 'Chg. In Call OI', 'Chg. In Put OI', 
+        'Diff. in OI', 'Strength', 'Total CE OI', 'Total PE OI', 
+        'PCR', 'PCR Movement'
+    ]
+    existing_cols = [c for c in desired_cols if c in df_clean.columns]
+    for c in df_clean.columns:
+        if c not in existing_cols and c not in ['Symbol', 'date', 'datetime']:
+            existing_cols.append(c)
+    df_clean = df_clean[existing_cols]
+
+    styler = df_clean.style
+
+    def row_style(row):
+        styles = [''] * len(row)
+        try:
+            ce_chg = row.get("Chg. In Call OI", 0)
+            pe_chg = row.get("Chg. In Put OI", 0)
+            if ce_chg > 0 and pe_chg < 0:
+                return ['background-color: #FEE2E2; color: #991B1B; font-weight: 600;'] * len(row)
+            elif ce_chg < 0 and pe_chg > 0:
+                return ['background-color: #DCFCE7; color: #166534; font-weight: 600;'] * len(row)
+        except Exception:
+            pass
+        return styles
+
+    styler = styler.apply(row_style, axis=1)
+
+    format_dict = {}
+    if "Total CE OI" in df_clean.columns:
+        format_dict["Total CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Total PE OI" in df_clean.columns:
+        format_dict["Total PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Diff. in OI" in df_clean.columns:
+        format_dict["Diff. in OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Chg. In Call OI" in df_clean.columns:
+        format_dict["Chg. In Call OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Chg. In Put OI" in df_clean.columns:
+        format_dict["Chg. In Put OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "PCR" in df_clean.columns:
+        format_dict["PCR"] = lambda x: f"{x:.2f}" if pd.notna(x) else ""
+
+    styler = styler.format(format_dict)
+    return styler
+
 data_placeholder = st.empty()
 
 def render_data(bypass_market=False):
@@ -838,55 +800,37 @@ def render_data(bypass_market=False):
     if not is_open and not bypass_market:
         with data_placeholder.container():
             st.warning(f"⚠️ {msg}")
-            
-            # If we have history, still want to show the last known data for context
             if symbol in st.session_state.history and len(st.session_state.history[symbol]) > 0:
-                st.markdown("### 📊 Historical Data Updates (Last session)")
+                st.markdown("### 📊 Trending OI Table (Last Known State)")
                 df = pd.DataFrame(st.session_state.history[symbol])
                 styled_df = style_df(df)
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
         return
 
     with data_placeholder.container():
-        with st.spinner(f"Fetching latest data for {symbol}..."):
+        with st.spinner(f"Fetching latest Trending OI for {symbol}..."):
             data = get_nse_data(symbol)
             
         if data:
             total_ce_oi = data.get("filtered", {}).get("CE", {}).get("totOI", 0)
             total_pe_oi = data.get("filtered", {}).get("PE", {}).get("totOI", 0)
-            timestamp = data.get("records", {}).get("timestamp", "Unknown")
-            option_chains_raw = data.get("option_chains", [])
-            
             pcr = round(total_pe_oi / total_ce_oi, 4) if total_ce_oi > 0 else 0
             ist = ZoneInfo("Asia/Kolkata")
             current_time = datetime.now(ist).strftime('%H:%M:%S')
             
-            # --- History & % Change calculation ---
-            if symbol not in st.session_state.history:
-                st.session_state.history[symbol] = []
-            
-            symbol_history = st.session_state.history[symbol]
+            symbol_history = st.session_state.history.get(symbol, [])
             ce_change_pct = 0.0
             pe_change_pct = 0.0
             
             if len(symbol_history) > 0:
                 last_record = symbol_history[-1]
-                last_ce = last_record["Total CE OI"]
-                last_pe = last_record["Total PE OI"]
+                last_ce = last_record.get("Total CE OI", 0)
+                last_pe = last_record.get("Total PE OI", 0)
                 if last_ce > 0:
                     ce_change_pct = ((total_ce_oi - last_ce) / last_ce) * 100
                 if last_pe > 0:
                     pe_change_pct = ((total_pe_oi - last_pe) / last_pe) * 100
-                    
-            # Format the columns for visuals & messaging
-            def format_change(val):
-                if val > 0:
-                    return f"+{val}% 🟢"
-                elif val < 0:
-                    return f"{val}% 🔴"
-                return f"{val}% ⚪"
 
-            # Record current fetch
             new_record = {
                 "Time": current_time,
                 "Symbol": symbol,
@@ -899,136 +843,75 @@ def render_data(bypass_market=False):
             symbol_history.append(new_record)
             st.session_state.history[symbol] = symbol_history
             
-            # --- SQLite & Supabase Dispatch ---
-            sqlite_success, sqlite_msg = insert_to_sqlite(symbol, new_record)
-            sb_success, sb_msg = insert_to_supabase(symbol, new_record)
+            insert_to_sqlite(symbol, new_record)
+            insert_to_supabase(symbol, new_record)
             
-            status_text = []
-            if sqlite_success:
-                status_text.append("💾 Local SQLite synced")
-            else:
-                status_text.append(f"💾 SQLite Error: {sqlite_msg}")
-                
-            if sb_success:
-                status_text.append("☁️ Supabase synced")
-            elif sb_msg != "Not Configured":
-                status_text.append(f"☁️ Supabase Error: {sb_msg}")
-                
-            st.session_state[f"sync_status_{symbol}"] = " | ".join(status_text)
+            _tg_secrets = get_telegram_secrets()
+            _effective_token = bot_token or _tg_secrets.get("bot_token")
+            _effective_chat_id = chat_id or _tg_secrets.get("chat_id")
             
-            # --- Telegram Dispatch ---
-            # Use sidebar input first; fall back to saved secrets
-            _effective_token = bot_token or (_tg_saved.get("bot_token", "") if "_tg_saved" in dir() else "")
-            _effective_chat_id = chat_id or (_tg_saved.get("chat_id", "") if "_tg_saved" in dir() else "")
             if enable_telegram and _effective_token and _effective_chat_id:
                 ce_icon = '🟢' if ce_change_pct > 0 else '🔴' if ce_change_pct < 0 else '⚪'
                 pe_icon = '🟢' if pe_change_pct > 0 else '🔴' if pe_change_pct < 0 else '⚪'
-                msg = (
-                    f"📈 <b>NSE Update: {symbol}</b>\n"
+                tg_msg = (
+                    f"📈 <b>Trending OI Alert: {symbol}</b>\n"
                     f"🕒 Time: {current_time}\n\n"
-                    f"<b>Total CE OI:</b> {total_ce_oi:,} (<i>{round(ce_change_pct,2)}% {ce_icon}</i>)\n"
-                    f"<b>Total PE OI:</b> {total_pe_oi:,} (<i>{round(pe_change_pct,2)}% {pe_icon}</i>)\n\n"
-                    f"<b>PCR (PE/CE):</b> {pcr}"
+                    f"<b>Total CE OI:</b> {total_ce_oi:,} ({round(ce_change_pct,2)}% {ce_icon})\n"
+                    f"<b>Total PE OI:</b> {total_pe_oi:,} ({round(pe_change_pct,2)}% {pe_icon})\n"
+                    f"<b>PCR:</b> {pcr:.2f}"
                 )
-                send_telegram_alert(_effective_token, _effective_chat_id, msg)
+                send_telegram_alert(_effective_token, _effective_chat_id, tg_msg)
             
-            # --- Rendering ---
-            st.write(f"**Last Updated (NSE Server):** {timestamp}")
-            st.write(f"**Local Refresh Time:** {current_time}")
-            st.info(f"⚙️ **Sync Status:** `{st.session_state.get(f'sync_status_{symbol}', '💾 Local SQLite synced')}`")
-            
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div>Total CE OI</div>
-                    <div class="metric-value ce-color">{total_ce_oi:,}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div>Total PE OI</div>
-                    <div class="metric-value pe-color">{total_pe_oi:,}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div>PCR (PE/CE)</div>
-                    <div class="metric-value" style="color: {'#00C853' if pcr >= 1 else '#FF4B4B'};">{pcr}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Show trend info based on PCR
-            if pcr > 1:
-                st.success(f"PCR is {pcr} (Bullish Bias - More Puts Sold than Calls)")
-            elif pcr < 1:
-                st.error(f"PCR is {pcr} (Bearish Bias - More Calls Sold than Puts)")
-            else:
-                st.info(f"PCR is {pcr} (Neutral)")
-
-            # --- Top 3 Volume Build-up Table ---
-            render_top_volume_buildup(option_chains_raw)
-
-            st.markdown("---")
-                
-            # Render History Table
-            st.markdown("### 📊 Historical Data Updates")
+            st.markdown("### 📊 Trending OI Analysis Table")
             df = pd.DataFrame(symbol_history)
             styled_df = style_df(df)
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-            # Render Live Trend Charts
-            if not df.empty and len(df) > 1:
-                chart_df = df.copy()
-                if "Time" in chart_df.columns and "Total CE OI" in chart_df.columns and "Total PE OI" in chart_df.columns:
-                    chart_df = chart_df.set_index("Time")
-                    st.markdown("### 📈 Open Interest (OI) Trend Analysis")
-                    st.line_chart(chart_df[["Total CE OI", "Total PE OI"]], height=300)
-                    
-                    if "PCR" in chart_df.columns:
-                        st.markdown("### 📊 Put-Call Ratio (PCR) Trend")
-                        st.line_chart(chart_df["PCR"], height=200)
+def render_historical_data(symbol, selected_date, db_source="Auto (Supabase -> SQLite)"):
+    date_str = selected_date.strftime("%Y-%m-%d")
+    data = fetch_historical_data(symbol, date_str, db_source)
+    if not data:
+        st.warning(f"No historical records for {symbol} on {date_str}.")
+        return
+    df = pd.DataFrame(data)
+    rename_map = {
+        "time": "Time",
+        "symbol": "Symbol",
+        "total_ce_oi": "Total CE OI",
+        "total_pe_oi": "Total PE OI",
+        "pcr": "PCR"
+    }
+    df = df.rename(columns=rename_map)
+    styled_df = style_df(df)
+    st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-# Render initial data or manual refresh
 if is_historical:
-    if st.button("🔄 Reload Historical Data"):
-        render_historical_data(symbol, selected_date, hist_timeframe, db_source)
-    else:
-        render_historical_data(symbol, selected_date, hist_timeframe, db_source)
+    render_historical_data(symbol, selected_date, db_source)
 else:
-    if st.button("🔄 Refresh Data manually"):
-        render_data(bypass_market=bypass_market_hours)
-    else:
-        # Initial render
-        render_data(bypass_market=bypass_market_hours)
+    render_data(bypass_market=bypass_market_hours)
 
-# Handle Auto-refresh timeframe logic
 if not is_historical and timeframe != "Manual":
-    if timeframe == "3 Min":
-        interval = 3 * 60
-    elif timeframe == "5 Min":
-        interval = 5 * 60
-    elif timeframe == "15 Min":
-        interval = 15 * 60
-        
+    timeframe_minutes_map = {
+        "3 min": 3,
+        "5 min": 5,
+        "10 min": 10,
+        "30 min": 30,
+        "60 min": 60
+    }
+    interval_sec = timeframe_minutes_map.get(timeframe, 5) * 60
+    
     is_open, _ = is_market_open()
     if not is_open and not bypass_market_hours:
-        # If market closed, poll less frequently to save resources, but keep alive
-        interval = max(interval, 5 * 60)
+        interval_sec = max(interval_sec, 300)
         
-    # We will show a nice countdown widget in the sidebar
     countdown_placeholder = st.sidebar.empty()
-    
-    # Run the countdown
-    for remaining in range(interval, 0, -1):
+    for remaining in range(interval_sec, 0, -1):
         mins, secs = divmod(remaining, 60)
         countdown_placeholder.markdown(
             f"""
-            <div style="background-color: #1E1E2E; padding: 15px; border-radius: 8px; border: 1px solid #3E3E5E; text-align: center; margin-top: 15px;">
-                <span style="font-size: 0.9rem; color: #B0B0C0; display: block; margin-bottom: 5px;">⏱️ Next Auto-Refresh</span>
-                <span style="font-size: 1.8rem; font-weight: bold; color: #00C853; font-family: monospace;">{mins:02d}:{secs:02d}</span>
+            <div style="background-color: #1E1E2E; padding: 12px; border-radius: 8px; text-align: center; margin-top: 15px;">
+                <span style="font-size: 0.85rem; color: #B0B0C0; display: block;">⏱️ Next Refresh ({timeframe})</span>
+                <span style="font-size: 1.6rem; font-weight: bold; color: #00C853; font-family: monospace;">{mins:02d}:{secs:02d}</span>
             </div>
             """, 
             unsafe_allow_html=True

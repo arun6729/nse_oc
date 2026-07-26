@@ -269,8 +269,8 @@ def is_market_open():
     if now.weekday() >= 5: # 5=Sat, 6=Sun
         return False, "Market is closed on weekends (Mon-Fri active)."
         
-    market_open = dtime(9, 0) # 9:00 AM as requested
-    market_close = dtime(15, 30) # 3:30 PM as requested
+    market_open = dtime(9, 0)
+    market_close = dtime(15, 30)
     current_time = now.time()
     
     if not (market_open <= current_time <= market_close):
@@ -332,16 +332,14 @@ def load_today_history(symbol, db_source="Auto (Supabase -> SQLite)"):
                 })
         st.session_state.history[symbol] = session_history
 
-# Initialize session state for history
 if "history" not in st.session_state:
     st.session_state.history = {}
 
 st.set_page_config(page_title="Trending OI - Options Analysis", page_icon="📊", layout="wide")
 
-# Custom CSS for Modern 1Cliq / Trending OI Aesthetics
+# Custom CSS
 st.markdown("""
 <style>
-    /* Global layout & typography */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     
     html, body, [class*="css"] {
@@ -353,7 +351,6 @@ st.markdown("""
         color: #212529;
     }
     
-    /* Top Ticker Ribbon */
     .ticker-bar {
         background: #FFFFFF;
         border: 1px solid #E9ECEF;
@@ -376,8 +373,8 @@ st.markdown("""
     }
     .ticker-positive { color: #16a34a; font-weight: 700; }
     .ticker-negative { color: #dc2626; font-weight: 700; }
-    
-    /* Top 5 Stocks Table Container */
+    .max-pain-badge { background-color: #FEF3C7; color: #92400E; font-weight: 700; padding: 2px 8px; border-radius: 4px; border: 1px solid #FCD34D; }
+
     .top5-card {
         background: #FFF8F6;
         border: 1px solid #FED7AA;
@@ -396,14 +393,12 @@ st.markdown("""
         gap: 6px;
     }
 
-    /* Trending OI Table Styling */
     .stDataFrame {
         border-radius: 8px;
         border: 1px solid #DEE2E6;
         background-color: #FFFFFF;
     }
     
-    /* Header brand */
     .brand-header {
         display: flex;
         justify-content: space-between;
@@ -424,22 +419,9 @@ st.markdown("""
         color: #6C757D;
         margin-left: 8px;
     }
-
-    /* Badges */
-    .strength-badge {
-        padding: 3px 8px;
-        border-radius: 12px;
-        font-size: 0.8rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-    .badge-ce { background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
-    .badge-pe { background-color: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
-
 </style>
 """, unsafe_allow_html=True)
 
-# Top 5 Stocks Mapping per Index requirement
 TOP_5_STOCKS_MAP = {
     "NIFTY 50": [
         ("Reliance Industries", "RELIANCE"),
@@ -472,17 +454,10 @@ TOP_5_STOCKS_MAP = {
     "NIFTY NEXT 50": [
         ("Adani Enterprises", "ADANIENT"),
         ("Avenue Supermarts", "DMART"),
-        ("Zomato", "ETERNOM"), # fallback symbol
+        ("Zomato", "ETERNOM"),
         ("SBI Life Insurance", "SBILIFE"),
         ("ICICI Lombard", "ICICIGI")
     ]
-}
-
-INDEX_TO_TOP5_KEY = {
-    "NIFTY": "NIFTY 50",
-    "BANKNIFTY": "NIFTY BANK",
-    "FINNIFTY": "NIFTY FINANCIAL SERVICES",
-    "MIDCPNIFTY": "NIFTY NEXT 50"
 }
 
 GROWW_SYMBOL_MAP = {
@@ -511,6 +486,32 @@ def get_live_stock_quote(symbol_code):
         pass
     return {"ltp": 0.0, "chg": 0.0, "chg_pct": 0.0, "close": 0.0}
 
+# Requirement 6: Max Pain Calculation
+def calculate_max_pain(option_chains):
+    """Calculate Max Pain strike from option chain rows."""
+    if not option_chains:
+        return 0.0
+    try:
+        min_loss = float('inf')
+        max_pain_strike = 0.0
+        for target in option_chains:
+            target_strike = target.get('strikePrice', 0) / 100.0
+            total_loss = 0.0
+            for row in option_chains:
+                strike = row.get('strikePrice', 0) / 100.0
+                ce_oi = row.get('callOption', {}).get('openInterest', 0) or 0
+                pe_oi = row.get('putOption', {}).get('openInterest', 0) or 0
+                if target_strike > strike:
+                    total_loss += (target_strike - strike) * ce_oi
+                elif target_strike < strike:
+                    total_loss += (strike - target_strike) * pe_oi
+            if total_loss < min_loss and target_strike > 0:
+                min_loss = total_loss
+                max_pain_strike = target_strike
+        return max_pain_strike
+    except Exception:
+        return 0.0
+
 def get_nse_data(symbol):
     """Fetch live option chain data natively via Groww API."""
     groww_sym = GROWW_SYMBOL_MAP.get(symbol.upper(), symbol.lower())
@@ -529,6 +530,7 @@ def get_nse_data(symbol):
                 total_ce_oi += row.get("callOption", {}).get("openInterest", 0)
                 total_pe_oi += row.get("putOption", {}).get("openInterest", 0)
                 
+            max_pain = calculate_max_pain(option_chains)
             return {
                 "filtered": {
                     "CE": {"totOI": total_ce_oi},
@@ -537,7 +539,8 @@ def get_nse_data(symbol):
                 "records": {
                     "timestamp": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d-%b-%Y %H:%M:%S IST")
                 },
-                "option_chains": option_chains
+                "option_chains": option_chains,
+                "max_pain": max_pain
             }
         else:
             st.error(f"⚠️ Failed to fetch option chain. Status: {response.status_code}")
@@ -556,7 +559,7 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         st.sidebar.error(f"Telegram Error: {e}")
 
-# --- Sidebar Configuration ---
+# Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ App Settings")
     bypass_market_hours = st.checkbox(
@@ -609,21 +612,18 @@ with st.sidebar:
         index=0
     )
 
-# --- Header & Controls Row (Item 6: Web Interface matching attached UI) ---
+# Requirement 3: Clean Header without 1Cliq branding badge
 st.markdown("""
 <div class="brand-header">
     <div>
         <span class="brand-title">Trending OI - PA</span>
         <span class="brand-sub">Options Analysis & Realtime Market Metrics</span>
     </div>
-    <div>
-        <span style="background-color:#991B1B; color:white; font-weight:bold; padding:4px 10px; border-radius:4px; font-size:0.85rem;">1Cliq Style</span>
-    </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Top Bar Spot and Futures Prices Ticker (Item 3 & Item 4)
-top_ticker_col1, top_ticker_col2 = st.columns([1.5, 2.5])
+# Top Bar Spot, Futures & Requirement 6: Max Pain Ticker Ribbon
+top_ticker_col1, top_ticker_col2 = st.columns([1.8, 2.2])
 
 with top_ticker_col1:
     idx_spot_data = get_live_stock_quote("RELIANCE")
@@ -632,21 +632,28 @@ with top_ticker_col1:
     spot_chg = -102.15 if idx_spot_data['chg'] == 0 else (idx_spot_data['chg'] * 15)
     spot_chg_pct = (spot_chg / spot_val) * 100
     
+    # Calculate or retrieve current Max Pain
+    live_max_pain = st.session_state.get(f"max_pain_{st.session_state.get('selected_symbol', 'NIFTY')}", 23900.0)
+    
     chg_class = "ticker-negative" if spot_chg < 0 else "ticker-positive"
     chg_sign = "+" if spot_chg > 0 else ""
     
     st.markdown(f"""
     <div class="ticker-bar">
         <div class="ticker-item">
-            <span>Underlying Spot:</span> 
+            <span>Spot:</span> 
             <span style="font-weight:700;">{spot_val:,.2f}</span>
         </div>
         <div class="ticker-item">
             <span>Futures:</span> 
             <span style="font-weight:700;">{fut_val:,.2f}</span>
         </div>
+        <div class="ticker-item">
+            <span>Max Pain:</span> 
+            <span class="max-pain-badge">{live_max_pain:,.0f}</span>
+        </div>
         <div class="ticker-item {chg_class}">
-            <span>Chg: {chg_sign}{spot_chg:,.2f} ({chg_sign}{spot_chg_pct:.2f}%)</span>
+            <span>{chg_sign}{spot_chg:,.2f} ({chg_sign}{spot_chg_pct:.2f}%)</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -676,19 +683,21 @@ with top_ticker_col2:
     </div>
     """, unsafe_allow_html=True)
 
-# Control Filters Row matching attached screenshot
+# Control Filters Row
 fc1, fc2, fc3, fc4, fc5 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
 
 with fc1:
     mode = st.radio("Mode", ["Live data", "Historical"], horizontal=True, index=0)
 with fc2:
     symbol = st.selectbox("Name", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
+    st.session_state['selected_symbol'] = symbol
 with fc3:
     selected_date = st.date_input("Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
 with fc4:
     expiry_date = st.selectbox("Expiry Date", ["28-Jul-2026", "04-Aug-2026", "11-Aug-2026"])
 with fc5:
-    timeframe = st.selectbox("Time Interval", ["3 min", "5 min", "10 min", "30 min", "60 min", "Manual"], index=1)
+    # Requirement 2: Added 15 min timeframe option
+    timeframe = st.selectbox("Time Interval", ["3 min", "5 min", "10 min", "15 min", "30 min", "60 min", "Manual"], index=1)
 
 is_historical = (mode == "Historical") or (selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date())
 
@@ -701,7 +710,6 @@ def calculate_pcr_arrow(pcr_diff):
     abs_diff = abs(pcr_diff)
     if abs_diff < 0.05:
         return "⚪"
-    
     num_arrows = 1
     if abs_diff >= 0.225:
         num_arrows = 3
@@ -709,69 +717,141 @@ def calculate_pcr_arrow(pcr_diff):
         num_arrows = 2
     elif abs_diff >= 0.10:
         num_arrows = 1
-        
     if pcr_diff > 0:
         return f"{'🟢' * num_arrows} {'↑' * num_arrows}"
     else:
         return f"{'🔴' * num_arrows} {'↓' * num_arrows}"
 
+# Requirement 1 & Requirements 4, 5: Exact Excel Column Order (A to J) & Warnings
 def style_df(df):
     if df.empty:
         return df
         
     df_clean = df.copy()
     
+    # Requirement 1: Calculate exact columns matching Excel layout (Cols A to J)
+    # Col A: time
+    # Col B: Total CE OI
+    # Col C: Total PE OI
+    # Col D: Difference col_A - Col_B (Total CE OI - Total PE OI)
+    # Col E: Strengh % of total OI
+    # Col F: Change in CE OI
+    # Col G: Change in PE OI
+    # Col H: Diff in col_E - Col_F (Change in CE OI - Change in PE OI)
+    # Col I: Strengh % of change in OI
+    # Col J: PCR with Strength
+    
     if "Total CE OI" in df_clean.columns and "Total PE OI" in df_clean.columns:
-        if "Chg. In Call OI" not in df_clean.columns:
-            df_clean["Chg. In Call OI"] = df_clean["Total CE OI"].diff().fillna(0).astype(int)
-        if "Chg. In Put OI" not in df_clean.columns:
-            df_clean["Chg. In Put OI"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
-        if "Diff. in OI" not in df_clean.columns:
-            df_clean["Diff. in OI"] = df_clean["Total PE OI"] - df_clean["Total CE OI"]
-            
-        def calc_strength(row):
+        # Col D: Difference (Total CE OI - Total PE OI)
+        df_clean["Difference col_A - Col_B"] = df_clean["Total CE OI"] - df_clean["Total PE OI"]
+        
+        # Col E: Strength % of Total OI
+        def calc_total_strength(row):
             ce = row["Total CE OI"]
             pe = row["Total PE OI"]
-            if ce == 0 and pe == 0:
-                return "0% Neutral"
             tot = max(ce, pe)
-            pct = round((abs(pe - ce) / tot) * 100, 1) if tot > 0 else 0
-            if pe > ce:
-                return f"PE +{pct}%"
-            elif ce > pe:
-                return f"CE +{pct}%"
-            return "0% Equal"
+            if tot == 0: return "0%"
+            pct = round((abs(ce - pe) / tot) * 100, 1)
+            return f"CE +{pct}%" if ce > pe else f"PE +{pct}%" if pe > ce else "0%"
             
-        df_clean["Strength"] = df_clean.apply(calc_strength, axis=1)
+        df_clean["Strengh % of total OI col_"] = df_clean.apply(calc_total_strength, axis=1)
+
+        # Col F & G: Change in CE OI & Change in PE OI
+        if "Change in CE OI" not in df_clean.columns:
+            df_clean["Change in CE OI"] = df_clean["Total CE OI"].diff().fillna(0).astype(int)
+        if "Change in PE OI" not in df_clean.columns:
+            df_clean["Change in PE OI"] = df_clean["Total PE OI"].diff().fillna(0).astype(int)
+            
+        # Col H: Diff in col_E - Col_F (Change in CE OI - Change in PE OI)
+        df_clean["Diff in col_E - Col_F"] = df_clean["Change in CE OI"] - df_clean["Change in PE OI"]
         
+        # Col I: Strength % of Change in OI
+        def calc_change_strength(row):
+            c_ce = abs(row["Change in CE OI"])
+            c_pe = abs(row["Change in PE OI"])
+            tot = max(c_ce, c_pe)
+            if tot == 0: return "0%"
+            pct = round((abs(c_ce - c_pe) / tot) * 100, 1)
+            return f"CE +{pct}%" if row["Change in CE OI"] > row["Change in PE OI"] else f"PE +{pct}%" if row["Change in PE OI"] > row["Change in CE OI"] else "0%"
+            
+        df_clean["Strengh % of change in OI"] = df_clean.apply(calc_change_strength, axis=1)
+
+    # Col J: PCR with Strength
     if "PCR" in df_clean.columns:
         pcr_diffs = df_clean["PCR"].diff().fillna(0)
-        df_clean["PCR Movement"] = pcr_diffs.apply(calculate_pcr_arrow)
+        df_clean["PCR with Strength"] = df_clean.apply(
+            lambda r: f"{r['PCR']:.2f} {calculate_pcr_arrow(pcr_diffs[r.name])}", axis=1
+        )
+
+    # Requirements 4 & 5: Detect Warning signs for Divergences
+    # Warning for Change in OI: Rise in Change CE & Fall in Change PE (Bearish ⚠️) or vice versa (Bullish ⚠️)
+    # Warning for Total OI: Continuous Rise in Total CE & Fall in Total PE (Bearish 🚨) or vice versa (Bullish 🚨)
+    warnings = []
+    for i in range(len(df_clean)):
+        w_str = ""
+        if i > 0:
+            curr_c_ce = df_clean.iloc[i]["Change in CE OI"]
+            prev_c_ce = df_clean.iloc[i-1]["Change in CE OI"]
+            curr_c_pe = df_clean.iloc[i]["Change in PE OI"]
+            prev_c_pe = df_clean.iloc[i-1]["Change in PE OI"]
+            
+            curr_t_ce = df_clean.iloc[i]["Total CE OI"]
+            prev_t_ce = df_clean.iloc[i-1]["Total CE OI"]
+            curr_t_pe = df_clean.iloc[i]["Total PE OI"]
+            prev_t_pe = df_clean.iloc[i-1]["Total PE OI"]
+            
+            # Req 4: Warning for Change in OI divergence
+            if curr_c_ce > prev_c_ce and curr_c_pe < prev_c_pe:
+                w_str += "⚠️ Bearish Chg Divergence "
+            elif curr_c_pe > prev_c_pe and curr_c_ce < prev_c_ce:
+                w_str += "⚠️ Bullish Chg Divergence "
+                
+            # Req 5: Warning for Total OI divergence
+            if curr_t_ce > prev_t_ce and curr_t_pe < prev_t_pe:
+                w_str += "🚨 Total CE Rising/PE Falling "
+            elif curr_t_pe > prev_t_pe and curr_t_ce < prev_t_ce:
+                w_str += "🚨 Total PE Rising/CE Falling "
+                
+        warnings.append(w_str.strip())
         
+    df_clean["Warning Signal"] = warnings
+
+    # Map to exact requested column order: Cols A to J + Warning
     desired_cols = [
-        'Time', 'Chg. In Call OI', 'Chg. In Put OI', 
-        'Diff. in OI', 'Strength', 'Total CE OI', 'Total PE OI', 
-        'PCR', 'PCR Movement'
+        'Time', 
+        'Total CE OI', 
+        'Total PE OI', 
+        'Difference col_A - Col_B', 
+        'Strengh % of total OI col_', 
+        'Change in CE OI', 
+        'Change in PE OI', 
+        'Diff in col_E - Col_F', 
+        'Strengh % of change in OI', 
+        'PCR with Strength',
+        'Warning Signal'
     ]
+    
+    # Rename Time column to match lower 'time' in Excel if desired
+    df_clean = df_clean.rename(columns={"Time": "time"})
+    desired_cols[0] = "time"
+    
     existing_cols = [c for c in desired_cols if c in df_clean.columns]
     for c in df_clean.columns:
-        if c not in existing_cols and c not in ['Symbol', 'date', 'datetime']:
+        if c not in existing_cols and c not in ['Symbol', 'date', 'datetime', 'PCR']:
             existing_cols.append(c)
+            
     df_clean = df_clean[existing_cols]
 
     styler = df_clean.style
 
+    # Highlight Warning rows with soft amber/red highlights
     def row_style(row):
         styles = [''] * len(row)
-        try:
-            ce_chg = row.get("Chg. In Call OI", 0)
-            pe_chg = row.get("Chg. In Put OI", 0)
-            if ce_chg > 0 and pe_chg < 0:
-                return ['background-color: #FEE2E2; color: #991B1B; font-weight: 600;'] * len(row)
-            elif ce_chg < 0 and pe_chg > 0:
-                return ['background-color: #DCFCE7; color: #166534; font-weight: 600;'] * len(row)
-        except Exception:
-            pass
+        w_val = row.get("Warning Signal", "")
+        if "Bearish" in w_val or "Total CE Rising" in w_val:
+            return ['background-color: #FEE2E2; color: #991B1B; font-weight: 600;'] * len(row)
+        elif "Bullish" in w_val or "Total PE Rising" in w_val:
+            return ['background-color: #DCFCE7; color: #166534; font-weight: 600;'] * len(row)
         return styles
 
     styler = styler.apply(row_style, axis=1)
@@ -781,14 +861,14 @@ def style_df(df):
         format_dict["Total CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
     if "Total PE OI" in df_clean.columns:
         format_dict["Total PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Diff. in OI" in df_clean.columns:
-        format_dict["Diff. in OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Chg. In Call OI" in df_clean.columns:
-        format_dict["Chg. In Call OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "Chg. In Put OI" in df_clean.columns:
-        format_dict["Chg. In Put OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
-    if "PCR" in df_clean.columns:
-        format_dict["PCR"] = lambda x: f"{x:.2f}" if pd.notna(x) else ""
+    if "Difference col_A - Col_B" in df_clean.columns:
+        format_dict["Difference col_A - Col_B"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Change in CE OI" in df_clean.columns:
+        format_dict["Change in CE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Change in PE OI" in df_clean.columns:
+        format_dict["Change in PE OI"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
+    if "Diff in col_E - Col_F" in df_clean.columns:
+        format_dict["Diff in col_E - Col_F"] = lambda x: f"{int(x):,}" if pd.notna(x) else ""
 
     styler = styler.format(format_dict)
     return styler
@@ -815,6 +895,9 @@ def render_data(bypass_market=False):
             total_ce_oi = data.get("filtered", {}).get("CE", {}).get("totOI", 0)
             total_pe_oi = data.get("filtered", {}).get("PE", {}).get("totOI", 0)
             pcr = round(total_pe_oi / total_ce_oi, 4) if total_ce_oi > 0 else 0
+            max_pain = data.get("max_pain", 0.0)
+            st.session_state[f"max_pain_{symbol}"] = max_pain
+            
             ist = ZoneInfo("Asia/Kolkata")
             current_time = datetime.now(ist).strftime('%H:%M:%S')
             
@@ -858,6 +941,7 @@ def render_data(bypass_market=False):
                     f"🕒 Time: {current_time}\n\n"
                     f"<b>Total CE OI:</b> {total_ce_oi:,} ({round(ce_change_pct,2)}% {ce_icon})\n"
                     f"<b>Total PE OI:</b> {total_pe_oi:,} ({round(pe_change_pct,2)}% {pe_icon})\n"
+                    f"<b>Max Pain:</b> {max_pain:,.0f}\n"
                     f"<b>PCR:</b> {pcr:.2f}"
                 )
                 send_telegram_alert(_effective_token, _effective_chat_id, tg_msg)
@@ -895,6 +979,7 @@ if not is_historical and timeframe != "Manual":
         "3 min": 3,
         "5 min": 5,
         "10 min": 10,
+        "15 min": 15,
         "30 min": 30,
         "60 min": 60
     }

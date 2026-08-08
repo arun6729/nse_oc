@@ -673,6 +673,25 @@ def render_otm_tracker_table(history_records, timeframe_str):
     df_multi.columns = pd.MultiIndex.from_tuples(df_multi.columns)
     st.dataframe(df_multi, use_container_width=True, hide_index=True)
 
+# Sidebar Configuration
+with st.sidebar:
+    st.header("⚙️ App Settings")
+    bypass_market_hours = st.checkbox("Bypass Market Hours", value=False)
+    
+    st.header("⚡ Auto-Start VM/App (Mon-Fri 8:55 AM)")
+    st.success("🟢 Active: Windows Task 'TrendingOI_AutoStart_855AM'")
+
+    st.header("🗄️ Database Storage")
+    st.success("💾 SQLite Local DB: Active (nse_data.db)")
+    sb_secrets = get_supabase_secrets()
+    if sb_secrets:
+        st.success("☁️ Supabase Cloud: Active")
+    else:
+        st.info("☁️ Supabase Cloud: Not configured")
+
+    st.markdown("---")
+    db_source = st.radio("Select Historical Query Source", options=["Auto (Supabase -> SQLite)", "Supabase Cloud Only", "Local SQLite Only"], index=0)
+
 def style_trending_table(df_in):
     """Req 4: Insert total CE OI and total PE OI columns fetching values from bottom of option chain."""
     if df_in.empty:
@@ -701,7 +720,6 @@ def style_trending_table(df_in):
     
     styler = styler.format(format_dict)
     return styler
-
 
 data_placeholder = st.empty()
 
@@ -751,7 +769,6 @@ def render_dashboard(bypass_market=False):
             # Render OTM Tracker Table matching attached layout
             render_otm_tracker_table(symbol_history, timeframe)
 
-bypass_market_hours = st.session_state.get('bypass_market_hours', False)
 render_dashboard(bypass_market=bypass_market_hours)
 
 if not is_historical and timeframe != "Manual":
@@ -773,3 +790,4 @@ if not is_historical and timeframe != "Manual":
         time.sleep(1)
         
     st.rerun()
+

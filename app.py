@@ -676,7 +676,12 @@ def render_otm_tracker_table(history_records, timeframe_str):
 # Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ App Settings")
-    bypass_market_hours = st.checkbox("Bypass Market Hours", value=False)
+    bypass_market_hours = st.checkbox(
+        "🔓 Bypass Market Hours", 
+        value=st.session_state.get("bypass_market_hours", True),
+        key="bypass_market_hours",
+        help="Check to force live option chain data fetch outside 9:00 AM - 3:30 PM Mon-Fri market schedule."
+    )
     
     st.header("⚡ Auto-Start VM/App (Mon-Fri 8:55 AM)")
     st.success("🟢 Active: Windows Task 'TrendingOI_AutoStart_855AM'")

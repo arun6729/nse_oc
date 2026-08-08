@@ -723,13 +723,23 @@ def style_trending_table(df_in):
 
 data_placeholder = st.empty()
 
-def render_dashboard(bypass_market=False):
+def render_dashboard(symbol, timeframe, spot_price_val, bypass_market=False):
     is_open, msg = is_market_open()
     
     with data_placeholder.container():
         if not is_open and not bypass_market:
             st.warning(f"⚠️ {msg}")
-            
+            symbol_history = st.session_state.history.get(symbol, [])
+            if symbol_history:
+                raw_df = pd.DataFrame(symbol_history)
+                resampled_df = resample_by_interval(raw_df, timeframe)
+                processed_df = calculate_strength_direction(resampled_df)
+                
+                st.markdown(f"### 📊 Trending OI Table ({timeframe} Interval - Last Recorded)")
+                st.dataframe(style_trending_table(processed_df), use_container_width=True, hide_index=True)
+                render_otm_tracker_table(symbol_history, timeframe)
+            return
+
         with st.spinner(f"Fetching latest metrics for {symbol}..."):
             data = get_nse_data(symbol)
             
@@ -758,7 +768,7 @@ def render_dashboard(bypass_market=False):
             insert_to_sqlite(symbol, new_record)
             insert_to_supabase(symbol, new_record)
             
-            # Req 3: Resample data based on selected interval dropdown
+            # Resample data based on selected interval dropdown
             raw_df = pd.DataFrame(symbol_history)
             resampled_df = resample_by_interval(raw_df, timeframe)
             processed_df = calculate_strength_direction(resampled_df)
@@ -769,7 +779,7 @@ def render_dashboard(bypass_market=False):
             # Render OTM Tracker Table matching attached layout
             render_otm_tracker_table(symbol_history, timeframe)
 
-render_dashboard(bypass_market=bypass_market_hours)
+render_dashboard(symbol=symbol, timeframe=timeframe, spot_price_val=spot_price_val, bypass_market=bypass_market_hours)
 
 if not is_historical and timeframe != "Manual":
     tf_min_map = {"3 min": 3, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "60 min": 60}

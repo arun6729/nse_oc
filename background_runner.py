@@ -91,20 +91,25 @@ def extract_otm_metrics(option_chains, spot_price, step=50):
         return {}
     
     atm_strike = int(round(spot_price / step) * step)
-    
     sorted_chains = sorted(option_chains, key=lambda x: x.get("strikePrice", 0))
     
-    otm_ce_strikes = [atm_strike + (2 * step), atm_strike + (4 * step), atm_strike + (6 * step)]
-    otm_pe_strikes = [atm_strike - (2 * step), atm_strike - (4 * step), atm_strike - (6 * step)]
+    # 2 Strikes OTM CE, 1 Strike OTM CE, ATM CE, ATM PE, 1 Strike OTM PE, 2 Strikes OTM PE
+    otm_ce_2 = atm_strike + (2 * step)
+    otm_ce_1 = atm_strike + (1 * step)
+    atm_ce = atm_strike
+    atm_pe = atm_strike
+    otm_pe_1 = atm_strike - (1 * step)
+    otm_pe_2 = atm_strike - (2 * step)
     
     metrics = {
+        "spot": spot_price,
         "atm_strike": atm_strike,
-        "ce_2_otm": {"strike": otm_ce_strikes[0], "oi": 0, "chg_oi": 0, "vol": 0},
-        "ce_4_otm": {"strike": otm_ce_strikes[1], "oi": 0, "chg_oi": 0, "vol": 0},
-        "ce_6_otm": {"strike": otm_ce_strikes[2], "oi": 0, "chg_oi": 0, "vol": 0},
-        "pe_2_otm": {"strike": otm_pe_strikes[0], "oi": 0, "chg_oi": 0, "vol": 0},
-        "pe_4_otm": {"strike": otm_pe_strikes[1], "oi": 0, "chg_oi": 0, "vol": 0},
-        "pe_6_otm": {"strike": otm_pe_strikes[2], "oi": 0, "chg_oi": 0, "vol": 0},
+        "otm_ce_2": {"strike": otm_ce_2, "oi": 0, "chg_oi": 0, "vol": 0},
+        "otm_ce_1": {"strike": otm_ce_1, "oi": 0, "chg_oi": 0, "vol": 0},
+        "atm_ce": {"strike": atm_ce, "oi": 0, "chg_oi": 0, "vol": 0},
+        "atm_pe": {"strike": atm_pe, "oi": 0, "chg_oi": 0, "vol": 0},
+        "otm_pe_1": {"strike": otm_pe_1, "oi": 0, "chg_oi": 0, "vol": 0},
+        "otm_pe_2": {"strike": otm_pe_2, "oi": 0, "chg_oi": 0, "vol": 0},
     }
     
     strike_map = {}
@@ -112,28 +117,18 @@ def extract_otm_metrics(option_chains, spot_price, step=50):
         stk = int(row.get("strikePrice", 0) / 100)
         strike_map[stk] = row
         
-    for key, target_stk in [
-        ("ce_2_otm", otm_ce_strikes[0]), ("ce_4_otm", otm_ce_strikes[1]), ("ce_6_otm", otm_ce_strikes[2])
+    for key, target_stk, is_call in [
+        ("otm_ce_2", otm_ce_2, True), ("otm_ce_1", otm_ce_1, True), ("atm_ce", atm_ce, True),
+        ("atm_pe", atm_pe, False), ("otm_pe_1", otm_pe_1, False), ("otm_pe_2", otm_pe_2, False)
     ]:
         row = strike_map.get(target_stk)
         if row:
-            call = row.get("callOption", {})
-            oi = call.get("openInterest", 0) or 0
-            prev_oi = call.get("prevOpenInterest", 0) or 0
-            vol = call.get("volume", 0) or 0
+            opt = row.get("callOption" if is_call else "putOption", {})
+            oi = opt.get("openInterest", 0) or 0
+            prev_oi = opt.get("prevOpenInterest", 0) or 0
+            vol = opt.get("volume", 0) or 0
             metrics[key] = {"strike": target_stk, "oi": oi, "chg_oi": oi - prev_oi, "vol": vol}
 
-    for key, target_stk in [
-        ("pe_2_otm", otm_pe_strikes[0]), ("pe_4_otm", otm_pe_strikes[1]), ("pe_6_otm", otm_pe_strikes[2])
-    ]:
-        row = strike_map.get(target_stk)
-        if row:
-            put = row.get("putOption", {})
-            oi = put.get("openInterest", 0) or 0
-            prev_oi = put.get("prevOpenInterest", 0) or 0
-            vol = put.get("volume", 0) or 0
-            metrics[key] = {"strike": target_stk, "oi": oi, "chg_oi": oi - prev_oi, "vol": vol}
-            
     return metrics
 
 def extract_spot_from_oc(oc_data):
@@ -174,8 +169,7 @@ def record_snapshot_for_symbol(symbol):
     spot_price = quote.get("ltp", 0.0)
     if spot_price <= 0:
         spot_price = extract_spot_from_oc(oc_data)
-
-    
+        
     step = 100 if symbol == "BANKNIFTY" else 50
     otm_metrics = extract_otm_metrics(option_chains, spot_price, step=step)
     otm_json = json.dumps(otm_metrics)
@@ -226,7 +220,6 @@ def record_snapshot_for_symbol(symbol):
 
 def main():
     init_db()
-    print("Background Option Chain Daemon active. Recording data every minute...")
     symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
     for s in symbols:
         record_snapshot_for_symbol(s)

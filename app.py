@@ -603,203 +603,83 @@ def extract_otm_metrics(option_chains, spot_price, step=50):
             
     return metrics
 
-def render_otm_strike_matrix_table(history_records, timeframe_str):
-    """Req 5: Render dedicated OTM strike matrix table for 2, 4, 6 strike OTM CE/PE across 5m, 15m, 30m, 60m intervals."""
-    st.markdown("### 🎯 Selected Index OTM Strike Matrix (2, 4, 6 Strike OTM CE & PE)")
+def render_otm_tracker_table(history_records, timeframe_str):
+    """Req 1, 2, 3: Heading 'OTM Tracker', tracking interval changes, MultiIndex layout with strike price column headers."""
+    st.markdown("### 🎯 OTM Tracker")
     if not history_records:
         st.info("No OTM snapshot metrics recorded yet.")
         return
         
-    intervals = ["5 min", "15 min", "30 min", "60 min"]
-    matrix_rows = []
+    df_raw = pd.DataFrame(history_records)
+    resampled = resample_by_interval(df_raw, timeframe_str)
     
-    latest_rec = history_records[-1]
-    otm = latest_rec.get("otm_metrics", {})
-    if isinstance(otm, str):
-        try:
-            otm = json.loads(otm)
-        except Exception:
-            otm = {}
+    if resampled.empty:
+        st.info("No historical intervals recorded.")
+        return
+        
+    # Extract strikes from latest available otm_metrics
+    latest_otm = history_records[-1].get("otm_metrics", {})
+    if isinstance(latest_otm, str):
+        try: latest_otm = json.loads(latest_otm)
+        except Exception: latest_otm = {}
+        
+    spot_val = round(history_records[-1].get("spot_price", 24570.0))
+    stk_ce2 = latest_otm.get("otm_ce_2", {}).get("strike", "OTM CE 2 strike")
+    stk_ce1 = latest_otm.get("otm_ce_1", {}).get("strike", "OTM CE 1 strike")
+    stk_atm_ce = latest_otm.get("atm_ce", {}).get("strike", "ATM CE")
+    stk_atm_pe = latest_otm.get("atm_pe", {}).get("strike", "ATM PE")
+    stk_pe1 = latest_otm.get("otm_pe_1", {}).get("strike", "OTM PE 1 strike")
+    stk_pe2 = latest_otm.get("otm_pe_2", {}).get("strike", "OTM PE 2 strike")
+    
+    rows = []
+    for _, r in resampled.iterrows():
+        t_str = r.get("Time", "")
+        otm = r.get("otm_metrics", {})
+        if isinstance(otm, str):
+            try: otm = json.loads(otm)
+            except Exception: otm = {}
             
-    for tf in intervals:
-        matrix_rows.append({
-            "Time Interval": tf,
-            "CE 2 OTM Strike": otm.get("ce_2_otm", {}).get("strike", "-"),
-            "CE 2 OI": f"{otm.get('ce_2_otm', {}).get('oi', 0):,}",
-            "CE 2 Chg OI": f"{otm.get('ce_2_otm', {}).get('chg_oi', 0):,}",
-            "CE 2 Vol": f"{otm.get('ce_2_otm', {}).get('vol', 0):,}",
-            "CE 4 OTM Strike": otm.get("ce_4_otm", {}).get("strike", "-"),
-            "CE 4 OI": f"{otm.get('ce_4_otm', {}).get('oi', 0):,}",
-            "CE 4 Chg OI": f"{otm.get('ce_4_otm', {}).get('chg_oi', 0):,}",
-            "CE 4 Vol": f"{otm.get('ce_4_otm', {}).get('vol', 0):,}",
-            "PE 2 OTM Strike": otm.get("pe_2_otm", {}).get("strike", "-"),
-            "PE 2 OI": f"{otm.get('pe_2_otm', {}).get('oi', 0):,}",
-            "PE 2 Chg OI": f"{otm.get('pe_2_otm', {}).get('chg_oi', 0):,}",
-            "PE 2 Vol": f"{otm.get('pe_2_otm', {}).get('vol', 0):,}",
-            "PE 4 OTM Strike": otm.get("pe_4_otm", {}).get("strike", "-"),
-            "PE 4 OI": f"{otm.get('pe_4_otm', {}).get('oi', 0):,}",
-            "PE 4 Chg OI": f"{otm.get('pe_4_otm', {}).get('chg_oi', 0):,}",
-            "PE 4 Vol": f"{otm.get('pe_4_otm', {}).get('vol', 0):,}",
+        ce2 = otm.get("otm_ce_2", {})
+        ce1 = otm.get("otm_ce_1", {})
+        atm_ce = otm.get("atm_ce", {})
+        atm_pe = otm.get("atm_pe", {})
+        pe1 = otm.get("otm_pe_1", {})
+        pe2 = otm.get("otm_pe_2", {})
+        
+        rows.append({
+            ("time", "time"): t_str,
+            (f"OTM CE 2 ({stk_ce2})", "total OI"): f"{ce2.get('oi', 0):,}",
+            (f"OTM CE 2 ({stk_ce2})", "Change in OI"): f"{ce2.get('chg_oi', 0):,}",
+            (f"OTM CE 2 ({stk_ce2})", "Vol"): f"{ce2.get('vol', 0):,}",
+            (f"OTM CE 1 ({stk_ce1})", "total OI"): f"{ce1.get('oi', 0):,}",
+            (f"OTM CE 1 ({stk_ce1})", "Change in OI"): f"{ce1.get('chg_oi', 0):,}",
+            (f"OTM CE 1 ({stk_ce1})", "Vol"): f"{ce1.get('vol', 0):,}",
+            (f"ATM CE ({stk_atm_ce})", "total OI"): f"{atm_ce.get('oi', 0):,}",
+            (f"ATM CE ({stk_atm_ce})", "Change in OI"): f"{atm_ce.get('chg_oi', 0):,}",
+            (f"ATM CE ({stk_atm_ce})", "Vol"): f"{atm_ce.get('vol', 0):,}",
+            (f"Spot ({spot_val})", "Spot"): spot_val,
+            (f"ATM PE ({stk_atm_pe})", "total OI"): f"{atm_pe.get('oi', 0):,}",
+            (f"ATM PE ({stk_atm_pe})", "Change in OI"): f"{atm_pe.get('chg_oi', 0):,}",
+            (f"ATM PE ({stk_atm_pe})", "Vol"): f"{atm_pe.get('vol', 0):,}",
+            (f"OTM PE 1 ({stk_pe1})", "total OI"): f"{pe1.get('oi', 0):,}",
+            (f"OTM PE 1 ({stk_pe1})", "Change in OI"): f"{pe1.get('chg_oi', 0):,}",
+            (f"OTM PE 1 ({stk_pe1})", "Vol"): f"{pe1.get('vol', 0):,}",
+            (f"OTM PE 2 ({stk_pe2})", "total OI"): f"{pe2.get('oi', 0):,}",
+            (f"OTM PE 2 ({stk_pe2})", "Change in OI"): f"{pe2.get('chg_oi', 0):,}",
+            (f"OTM PE 2 ({stk_pe2})", "Vol"): f"{pe2.get('vol', 0):,}",
         })
         
-    df_otm = pd.DataFrame(matrix_rows)
-    st.dataframe(df_otm, use_container_width=True, hide_index=True)
-
-# Sidebar Configuration
-with st.sidebar:
-    st.header("⚙️ App Settings")
-    bypass_market_hours = st.checkbox("Bypass Market Hours", value=False)
-    
-    st.header("⚡ Auto-Start VM/App (Mon-Fri 8:55 AM)")
-    st.success("🟢 Active: Windows Task 'TrendingOI_AutoStart_855AM'")
-
-    st.header("🗄️ Database Storage")
-    st.success("💾 SQLite Local DB: Active (nse_data.db)")
-    sb_secrets = get_supabase_secrets()
-    if sb_secrets:
-        st.success("☁️ Supabase Cloud: Active")
-    else:
-        st.info("☁️ Supabase Cloud: Not configured")
-
-    st.markdown("---")
-    db_source = st.radio("Select Historical Query Source", options=["Auto (Supabase -> SQLite)", "Supabase Cloud Only", "Local SQLite Only"], index=0)
-
-# Control Filters Row matching attached reference screenshots
-st.markdown("""
-<div style="background:#FFF; padding:15px; border-radius:8px; border:1px solid #F3F4F6; margin-bottom:15px;">
-</div>
-""", unsafe_allow_html=True)
-
-fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2, 1.4])
-
-with fc1:
-    mode = st.radio("Mode", ["Live data", "Historical"], horizontal=True, index=0)
-with fc2:
-    symbol = st.selectbox("Name", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
-    st.session_state['selected_symbol'] = symbol
-with fc3:
-    selected_date = st.date_input("Date", value=datetime.now(ZoneInfo("Asia/Kolkata")).date())
-with fc4:
-    expiry_date = st.selectbox("Expiry Date", ["11-Aug-2026", "18-Aug-2026", "25-Aug-2026"])
-with fc5:
-    timeframe = st.selectbox("Time Interval", ["3 min", "5 min", "10 min", "15 min", "30 min", "60 min", "Manual"], index=4)
-with fc6:
-    st.markdown("<br>", unsafe_allow_html=True)
-    c_btn1, c_btn2 = st.columns(2)
-    with c_btn1:
-        st.button("Go", type="primary", use_container_width=True)
-    with c_btn2:
-        st.button("Change Strike Prices", use_container_width=True)
-
-# Underlying Spot & Change Header
-index_quote = get_live_stock_quote(symbol)
-spot_price_val = 24570.65 if index_quote['ltp'] == 0 else index_quote['ltp']
-chg_val = -65.35 if index_quote['chg'] == 0 else index_quote['chg']
-chg_pct_val = -0.27 if index_quote['chg_pct'] == 0 else index_quote['chg_pct']
-now_ist_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %H:%M:%S IST")
-
-chg_color = "#DC2626" if chg_val < 0 else "#16A34A"
-chg_sign = "" if chg_val < 0 else "+"
-
-st.markdown(f"""
-<div class="underlying-bar">
-    <strong>Underlying: {symbol}</strong> at <strong>{spot_price_val:,.2f}</strong>, Chg: <span style="color:{chg_color}; font-weight:700;">{chg_val:,.2f} ( {chg_sign}{chg_pct_val:.2f}% )</span> as on {now_ist_str}
-</div>
-""", unsafe_allow_html=True)
-
-# Req 1: Dynamic Top 5 Weightage Stocks based on selected index
-top5_stocks = INDEX_TOP_5_MAP.get(symbol.upper(), INDEX_TOP_5_MAP["NIFTY"])
-stock_items = []
-for name, sym_code in top5_stocks:
-    q = get_live_stock_quote(sym_code)
-    ltp = q['ltp']
-    chg_p = q['chg_pct']
-    s_class = "ticker-positive" if chg_p >= 0 else "ticker-negative"
-    s_sign = "+" if chg_p >= 0 else ""
-    if ltp > 0:
-        stock_items.append(f"<span style='font-weight:600; color:#1F2937;'>{name}:</span> <span class='{s_class}'>{ltp:,.2f} ({s_sign}{chg_p:.2f}%)</span>")
-    else:
-        stock_items.append(f"<span style='font-weight:600; color:#1F2937;'>{name}:</span> <span class='ticker-positive'>Active</span>")
-
-stocks_rendered = " &nbsp;|&nbsp; ".join(stock_items)
-
-st.markdown(f"""
-<div class="top5-card">
-    <div class="top5-title">📊 Top 5 Weightage Stocks ({symbol})</div>
-    <div style="font-size: 0.85rem;">{stocks_rendered}</div>
-</div>
-""", unsafe_allow_html=True)
-
-is_historical = (mode == "Historical") or (selected_date < datetime.now(ZoneInfo("Asia/Kolkata")).date())
-
-if symbol not in st.session_state.history:
-    st.session_state.history[symbol] = []
-if not is_historical:
-    load_today_history(symbol, db_source)
-
-def resample_by_interval(df, timeframe_str):
-    """Req 3: Resample 1-minute database records on the basis of time interval selected."""
-    if df.empty or "Time" not in df.columns:
-        return df
-    
-    tf_minutes_map = {"3 min": 3, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "60 min": 60}
-    mins = tf_minutes_map.get(timeframe_str, 30)
-    
-    try:
-        df_c = df.copy()
-        df_c["dt"] = pd.to_datetime(df_c["Time"], format="%H:%M:%S", errors='coerce')
-        df_c = df_c.dropna(subset=["dt"]).sort_values("dt")
-        
-        df_resampled = df_c.groupby(pd.Grouper(key="dt", freq=f"{mins}min")).last().reset_index()
-        df_resampled = df_resampled.dropna(subset=["Time"])
-        return df_resampled.drop(columns=["dt"], errors="ignore")
-    except Exception:
-        return df
-
-def calculate_strength_direction(df_in):
-    """Calculates Strength %, Direction of chg, Chg in Direction, Net PCR, and Day H/L Break matching attachment."""
-    if df_in.empty:
-        return df_in
-        
-    df = df_in.copy()
-    if "Total CE OI" in df.columns and "Total PE OI" in df.columns:
-        df["Chg. In Call OI"] = df["Total CE OI"].diff().fillna(0).astype(int)
-        df["Chg. In Put OI"] = df["Total PE OI"].diff().fillna(0).astype(int)
-        df["Diff. in OI"] = df["Total CE OI"] - df["Total PE OI"]
-        
-        def calc_strength(r):
-            tot = max(abs(r["Chg. In Call OI"]), abs(r["Chg. In Put OI"]))
-            if tot == 0: return "-0%"
-            pct = int(round((abs(r["Chg. In Call OI"] - r["Chg. In Put OI"]) / tot) * 100))
-            return f"-{pct}% •••"
-        
-        df["Strength"] = df.apply(calc_strength, axis=1)
-        
-        def calc_direction(r):
-            chg = r["Chg. In Put OI"] - r["Chg. In Call OI"]
-            pct = round((chg / max(r["Total CE OI"], 1)) * 100, 2)
-            arrow = "↑" if pct >= 0 else "↓"
-            return f"{arrow} {pct:.2f} %"
-            
-        df["Direction of chg."] = df.apply(calc_direction, axis=1)
-        df["Chg. In Direction"] = df["Chg. In Put OI"] - df["Chg. In Call OI"]
-        df["Total Call Ltp"] = 2159.05
-        df["Call Ltp chng."] = -865.6
-        df["CE + PE Ltp Chng."] = -508.45
-        df["Put Ltp chng."] = 357.15
-        df["Total Put Ltp"] = 2059.65
-        df["Net PCR"] = df["PCR"] if "PCR" in df.columns else 0.08
-        df["Day H/L Break"] = "-"
-        
-    return df
+    df_multi = pd.DataFrame(rows)
+    df_multi.columns = pd.MultiIndex.from_tuples(df_multi.columns)
+    st.dataframe(df_multi, use_container_width=True, hide_index=True)
 
 def style_trending_table(df_in):
-    """Req 6: High resolution table styling with monospaced numbers, clear column widths & badges."""
+    """Req 4: Insert total CE OI and total PE OI columns fetching values from bottom of option chain."""
     if df_in.empty:
         return df_in
         
     cols_order = [
-        "Time", "Day H/L Break", "Chg. In Call OI", "Chg. In Put OI", 
+        "Time", "Total CE OI", "Total PE OI", "Day H/L Break", "Chg. In Call OI", "Chg. In Put OI", 
         "Diff. in OI", "Strength", "Direction of chg.", "Chg. In Direction", 
         "Total Call Ltp", "Call Ltp chng.", "CE + PE Ltp Chng.", 
         "Put Ltp chng.", "Total Put Ltp", "Net PCR"
@@ -811,6 +691,8 @@ def style_trending_table(df_in):
     styler = df_out.style
     
     format_dict = {}
+    if "Total CE OI" in df_out.columns: format_dict["Total CE OI"] = lambda x: f"{int(x):,}"
+    if "Total PE OI" in df_out.columns: format_dict["Total PE OI"] = lambda x: f"{int(x):,}"
     if "Chg. In Call OI" in df_out.columns: format_dict["Chg. In Call OI"] = lambda x: f"{int(x):,}"
     if "Chg. In Put OI" in df_out.columns: format_dict["Chg. In Put OI"] = lambda x: f"{int(x):,}"
     if "Diff. in OI" in df_out.columns: format_dict["Diff. in OI"] = lambda x: f"{int(x):,}"
@@ -819,6 +701,7 @@ def style_trending_table(df_in):
     
     styler = styler.format(format_dict)
     return styler
+
 
 data_placeholder = st.empty()
 
@@ -865,8 +748,8 @@ def render_dashboard(bypass_market=False):
             st.markdown(f"### 📊 Trending OI Table ({timeframe} Interval)")
             st.dataframe(style_trending_table(processed_df), use_container_width=True, hide_index=True)
             
-            # Req 5: Dedicated 2, 4, 6 Strike OTM CE & PE Table
-            render_otm_strike_matrix_table(symbol_history, timeframe)
+            # Render OTM Tracker Table matching attached layout
+            render_otm_tracker_table(symbol_history, timeframe)
 
 render_dashboard(bypass_market=bypass_market_hours)
 

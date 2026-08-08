@@ -751,6 +751,7 @@ def render_dashboard(bypass_market=False):
             # Render OTM Tracker Table matching attached layout
             render_otm_tracker_table(symbol_history, timeframe)
 
+bypass_market_hours = st.session_state.get('bypass_market_hours', False)
 render_dashboard(bypass_market=bypass_market_hours)
 
 if not is_historical and timeframe != "Manual":

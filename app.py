@@ -4,6 +4,7 @@ import time
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 import pandas as pd
+import numpy as np
 import sqlite3
 import os
 import json
@@ -603,6 +604,120 @@ def extract_otm_metrics(option_chains, spot_price, step=50):
             
     return metrics
 
+def resample_by_interval(df, timeframe_str):
+    """
+    Resamples a dataframe by the given timeframe string (e.g., '3 min', '5 min', '15 min', '30 min', '60 min').
+    If timeframe_str is 'Manual', empty, or unknown, returns the original dataframe.
+    """
+    if df is None or df.empty or not timeframe_str or timeframe_str == "Manual":
+        return df if df is not None else pd.DataFrame()
+        
+    tf_map = {
+        "3 min": 3, "3min": 3,
+        "5 min": 5, "5min": 5,
+        "10 min": 10, "10min": 10,
+        "15 min": 15, "15min": 15,
+        "30 min": 30, "30min": 30,
+        "60 min": 60, "60min": 60
+    }
+    minutes = tf_map.get(timeframe_str)
+    if not minutes:
+        return df
+        
+    df_work = df.copy()
+    time_col = "Time" if "Time" in df_work.columns else ("time" if "time" in df_work.columns else None)
+    if not time_col:
+        return df_work
+
+    try:
+        dt_series = pd.to_datetime(df_work[time_col], format='%H:%M:%S', errors='coerce')
+        if dt_series.isna().all():
+            dt_series = pd.to_datetime(df_work[time_col], format='%H:%M:00', errors='coerce')
+        if dt_series.isna().all():
+            dt_series = pd.to_datetime(df_work[time_col], errors='coerce')
+            
+        if dt_series.isna().all():
+            return df_work
+            
+        df_work['_interval_bin'] = dt_series.dt.floor(f"{minutes}min")
+        resampled = df_work.groupby('_interval_bin', as_index=False).last()
+        resampled = resampled.drop(columns=['_interval_bin'], errors='ignore')
+        return resampled
+    except Exception:
+        return df
+
+def calculate_strength_direction(df):
+    """
+    Calculates Trending OI metrics, strength, direction of change, and PCR.
+    Expected columns by style_trending_table:
+    'Time', 'Total CE OI', 'Total PE OI', 'Day H/L Break', 'Chg. In Call OI', 'Chg. In Put OI',
+    'Diff. in OI', 'Strength', 'Direction of chg.', 'Chg. In Direction',
+    'Total Call Ltp', 'Call Ltp chng.', 'CE + PE Ltp Chng.',
+    'Put Ltp chng.', 'Total Put Ltp', 'Net PCR'
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+        
+    df_out = df.copy()
+    
+    if "Time" not in df_out.columns and "time" in df_out.columns:
+        df_out["Time"] = df_out["time"]
+        
+    if "Total CE OI" not in df_out.columns and "total_ce_oi" in df_out.columns:
+        df_out["Total CE OI"] = df_out["total_ce_oi"]
+    if "Total PE OI" not in df_out.columns and "total_pe_oi" in df_out.columns:
+        df_out["Total PE OI"] = df_out["total_pe_oi"]
+        
+    df_out["Total CE OI"] = pd.to_numeric(df_out.get("Total CE OI", 0), errors="coerce").fillna(0).astype(int)
+    df_out["Total PE OI"] = pd.to_numeric(df_out.get("Total PE OI", 0), errors="coerce").fillna(0).astype(int)
+    
+    df_out["Chg. In Call OI"] = df_out["Total CE OI"].diff().fillna(0).astype(int)
+    df_out["Chg. In Put OI"] = df_out["Total PE OI"].diff().fillna(0).astype(int)
+    
+    df_out["Diff. in OI"] = df_out["Total PE OI"] - df_out["Total CE OI"]
+    df_out["Chg. In Direction"] = df_out["Chg. In Put OI"] - df_out["Chg. In Call OI"]
+    
+    if "PCR" in df_out.columns:
+        df_out["Net PCR"] = pd.to_numeric(df_out["PCR"], errors="coerce").fillna(0.0)
+    elif "pcr" in df_out.columns:
+        df_out["Net PCR"] = pd.to_numeric(df_out["pcr"], errors="coerce").fillna(0.0)
+    else:
+        df_out["Net PCR"] = (df_out["Total PE OI"] / df_out["Total CE OI"].replace(0, np.nan)).fillna(0.0).round(2)
+        
+    def _eval_row(row):
+        chg_dir = row["Chg. In Direction"]
+        if chg_dir > 50000:
+            str_val = "Strong Bullish"
+            dir_val = "Bullish"
+        elif chg_dir > 0:
+            str_val = "Bullish"
+            dir_val = "Bullish"
+        elif chg_dir < -50000:
+            str_val = "Strong Bearish"
+            dir_val = "Bearish"
+        elif chg_dir < 0:
+            str_val = "Bearish"
+            dir_val = "Bearish"
+        else:
+            str_val = "Neutral"
+            dir_val = "Neutral"
+        return pd.Series([str_val, dir_val])
+        
+    if not df_out.empty:
+        df_out[["Strength", "Direction of chg."]] = df_out.apply(_eval_row, axis=1)
+    else:
+        df_out["Strength"] = "Neutral"
+        df_out["Direction of chg."] = "Neutral"
+        
+    if "Day H/L Break" not in df_out.columns:
+        df_out["Day H/L Break"] = "None"
+        
+    for col in ["Total Call Ltp", "Call Ltp chng.", "CE + PE Ltp Chng.", "Put Ltp chng.", "Total Put Ltp"]:
+        if col not in df_out.columns:
+            df_out[col] = 0.0
+            
+    return df_out
+
 def render_otm_tracker_table(history_records, timeframe_str):
     """Req 1, 2, 3: Heading 'OTM Tracker', tracking interval changes, MultiIndex layout with strike price column headers."""
     st.markdown("### 🎯 OTM Tracker")
@@ -789,6 +904,8 @@ _timeframe = timeframe if 'timeframe' in locals() or 'timeframe' in globals() el
 _spot_price_val = spot_price_val if 'spot_price_val' in locals() or 'spot_price_val' in globals() else 24570.65
 _bypass_market = bypass_market_hours if 'bypass_market_hours' in locals() or 'bypass_market_hours' in globals() else st.session_state.get("bypass_market_hours", True)
 
+load_today_history(_symbol, db_source if 'db_source' in locals() or 'db_source' in globals() else "Auto (Supabase -> SQLite)")
+
 render_dashboard(symbol=_symbol, timeframe=_timeframe, spot_price_val=_spot_price_val, bypass_market=_bypass_market)
 
 _is_historical = is_historical if 'is_historical' in locals() or 'is_historical' in globals() else False
@@ -803,7 +920,7 @@ if not _is_historical and _timeframe != "Manual":
         countdown_placeholder.markdown(
             f"""
             <div style="background-color: #1E1E2E; padding: 10px; border-radius: 8px; text-align: center; margin-top: 15px;">
-                <span style="font-size: 0.80rem; color: #B0B0C0; display: block;">⏱️ Next Dashboard Refresh ({timeframe})</span>
+                <span style="font-size: 0.80rem; color: #B0B0C0; display: block;">⏱️ Next Dashboard Refresh ({_timeframe})</span>
                 <span style="font-size: 1.4rem; font-weight: bold; color: #00C853; font-family: monospace;">{mins:02d}:{secs:02d}</span>
             </div>
             """, 

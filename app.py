@@ -899,34 +899,122 @@ def render_dashboard(symbol, timeframe, spot_price_val, bypass_market=False):
             # Render OTM Tracker Table matching attached layout
             render_otm_tracker_table(symbol_history, timeframe)
 
-_symbol = symbol if 'symbol' in locals() or 'symbol' in globals() else st.session_state.get('selected_symbol', 'NIFTY')
-_timeframe = timeframe if 'timeframe' in locals() or 'timeframe' in globals() else '30 min'
-_spot_price_val = spot_price_val if 'spot_price_val' in locals() or 'spot_price_val' in globals() else 24570.65
-_bypass_market = bypass_market_hours if 'bypass_market_hours' in locals() or 'bypass_market_hours' in globals() else st.session_state.get("bypass_market_hours", True)
+# --- Top Control Bar ---
+st.title("📊 NSE Options & Trending OI Analytics")
 
-load_today_history(_symbol, db_source if 'db_source' in locals() or 'db_source' in globals() else "Auto (Supabase -> SQLite)")
+c_sym, c_tf, c_mode = st.columns([1, 1, 1])
 
-render_dashboard(symbol=_symbol, timeframe=_timeframe, spot_price_val=_spot_price_val, bypass_market=_bypass_market)
+with c_sym:
+    symbol = st.selectbox(
+        "📊 Select NSE Index",
+        options=["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+        index=0,
+        key="selected_symbol"
+    )
 
-_is_historical = is_historical if 'is_historical' in locals() or 'is_historical' in globals() else False
+with c_tf:
+    timeframe = st.selectbox(
+        "⏱️ Select Timeframe",
+        options=["3 min", "5 min", "10 min", "15 min", "30 min", "60 min", "Manual"],
+        index=4,
+        key="selected_timeframe"
+    )
 
-if not _is_historical and _timeframe != "Manual":
-    tf_min_map = {"3 min": 3, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "60 min": 60}
-    interval_sec = tf_min_map.get(_timeframe, 15) * 60
-    
-    countdown_placeholder = st.sidebar.empty()
-    for remaining in range(interval_sec, 0, -1):
-        mins, secs = divmod(remaining, 60)
-        countdown_placeholder.markdown(
-            f"""
-            <div style="background-color: #1E1E2E; padding: 10px; border-radius: 8px; text-align: center; margin-top: 15px;">
-                <span style="font-size: 0.80rem; color: #B0B0C0; display: block;">⏱️ Next Dashboard Refresh ({_timeframe})</span>
-                <span style="font-size: 1.4rem; font-weight: bold; color: #00C853; font-family: monospace;">{mins:02d}:{secs:02d}</span>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
-        time.sleep(1)
+with c_mode:
+    data_mode = st.radio(
+        "⚡ Data Source",
+        options=["Live Data", "Historical Data"],
+        index=0,
+        horizontal=True,
+        key="selected_data_mode"
+    )
+
+selected_date = None
+if data_mode == "Historical Data":
+    selected_date = st.date_input(
+        "📅 Select Historical Date",
+        value=datetime.now(ZoneInfo("Asia/Kolkata")).date(),
+        key="selected_date"
+    )
+
+# --- Top 5 Weightage Stocks Banner for Selected Index ---
+st.markdown(f"#### 🏢 Top 5 Weightage Stocks ({symbol})")
+top_stocks_list = INDEX_TOP_5_MAP.get(symbol, [])
+
+if top_stocks_list:
+    stk_cols = st.columns(len(top_stocks_list))
+    for idx, (display_name, stock_code) in enumerate(top_stocks_list):
+        with stk_cols[idx]:
+            quote = get_live_stock_quote(stock_code)
+            ltp = quote.get("ltp", 0.0)
+            chg = quote.get("chg", 0.0)
+            chg_pct = quote.get("chg_pct", 0.0)
+            
+            if ltp > 0:
+                chg_str = f"{chg:+.2f} ({chg_pct:+.2f}%)"
+                st.metric(
+                    label=display_name,
+                    value=f"₹{ltp:,.2f}",
+                    delta=chg_str
+                )
+            else:
+                st.metric(
+                    label=display_name,
+                    value="₹ --.--",
+                    delta="0.00%"
+                )
+
+st.markdown("---")
+
+# --- Execute Dashboard based on Data Mode ---
+effective_db_source = db_source if 'db_source' in locals() or 'db_source' in globals() else "Auto (Supabase -> SQLite)"
+effective_bypass = bypass_market_hours if 'bypass_market_hours' in locals() or 'bypass_market_hours' in globals() else st.session_state.get("bypass_market_hours", True)
+
+if data_mode == "Historical Data" and selected_date:
+    date_str = selected_date.strftime("%Y-%m-%d")
+    with st.spinner(f"Loading historical metrics for {symbol} on {date_str}..."):
+        historical_records = fetch_historical_data(symbol, date_str, effective_db_source)
         
-    st.rerun()
+    if historical_records:
+        raw_df = pd.DataFrame(historical_records)
+        resampled_df = resample_by_interval(raw_df, timeframe)
+        processed_df = calculate_strength_direction(resampled_df)
+        
+        st.markdown(f"### 📊 Historical Trending OI Table ({symbol} - {date_str} - {timeframe} Interval)")
+        st.dataframe(style_trending_table(processed_df), use_container_width=True, hide_index=True)
+        
+        render_otm_tracker_table(historical_records, timeframe)
+    else:
+        st.info(f"ℹ️ No historical records found for {symbol} on {date_str}.")
+
+else:
+    # Live Data Mode
+    load_today_history(symbol, effective_db_source)
+    spot_quote = get_live_stock_quote(symbol)
+    spot_price_val = spot_quote.get("ltp", 24570.65)
+    if spot_price_val <= 0:
+        spot_price_val = 24570.65
+        
+    render_dashboard(symbol=symbol, timeframe=timeframe, spot_price_val=spot_price_val, bypass_market=effective_bypass)
+    
+    if timeframe != "Manual":
+        tf_min_map = {"3 min": 3, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "60 min": 60}
+        interval_sec = tf_min_map.get(timeframe, 15) * 60
+        
+        countdown_placeholder = st.sidebar.empty()
+        for remaining in range(interval_sec, 0, -1):
+            mins, secs = divmod(remaining, 60)
+            countdown_placeholder.markdown(
+                f"""
+                <div style="background-color: #1E1E2E; padding: 10px; border-radius: 8px; text-align: center; margin-top: 15px;">
+                    <span style="font-size: 0.80rem; color: #B0B0C0; display: block;">⏱️ Next Dashboard Refresh ({timeframe})</span>
+                    <span style="font-size: 1.4rem; font-weight: bold; color: #00C853; font-family: monospace;">{mins:02d}:{secs:02d}</span>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+            time.sleep(1)
+            
+        st.rerun()
+
 

@@ -784,11 +784,18 @@ def render_dashboard(symbol, timeframe, spot_price_val, bypass_market=False):
             # Render OTM Tracker Table matching attached layout
             render_otm_tracker_table(symbol_history, timeframe)
 
-render_dashboard(symbol=symbol, timeframe=timeframe, spot_price_val=spot_price_val, bypass_market=bypass_market_hours)
+_symbol = symbol if 'symbol' in locals() or 'symbol' in globals() else st.session_state.get('selected_symbol', 'NIFTY')
+_timeframe = timeframe if 'timeframe' in locals() or 'timeframe' in globals() else '30 min'
+_spot_price_val = spot_price_val if 'spot_price_val' in locals() or 'spot_price_val' in globals() else 24570.65
+_bypass_market = bypass_market_hours if 'bypass_market_hours' in locals() or 'bypass_market_hours' in globals() else st.session_state.get("bypass_market_hours", True)
 
-if not is_historical and timeframe != "Manual":
+render_dashboard(symbol=_symbol, timeframe=_timeframe, spot_price_val=_spot_price_val, bypass_market=_bypass_market)
+
+_is_historical = is_historical if 'is_historical' in locals() or 'is_historical' in globals() else False
+
+if not _is_historical and _timeframe != "Manual":
     tf_min_map = {"3 min": 3, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "60 min": 60}
-    interval_sec = tf_min_map.get(timeframe, 15) * 60
+    interval_sec = tf_min_map.get(_timeframe, 15) * 60
     
     countdown_placeholder = st.sidebar.empty()
     for remaining in range(interval_sec, 0, -1):
